@@ -156,15 +156,14 @@ static __inline unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
 
 /* Returns the payload size of the IDAT chunk. */
 static uint32_t write_png_img_data(
-    FILE *f, const char *img_data, uint32_t rlen, uint32_t height,
+    FILE *f, const char *img_data, register uint32_t rlen, uint32_t height,
     char *tmp, xbool_t is_predictor, uint8_t bpc_cpp) {
   /* !! do it compressed instead. */
   const uint32_t rlen1 = rlen + 1;
-  const uint32_t usize = multiply_check(rlen + 1, height);
+  const uint32_t usize = multiply_check(rlen1, height);
   uint32_t size = 11;  /* "IDAT" "x\1" "\1" ... 4(adler32) */
   uint32_t adler32v = 1;
   uint32_t crc32v;
-  uint32_t i;
   char buf[17];
   /* If more than 24 bits, then rowsum would overflow. */
   if (rlen >> 24) die("image rlen too large");
@@ -179,64 +178,67 @@ static uint32_t write_png_img_data(
     /* Since 1 <= bpc_cpp <= 24, so 1 <= left_delta <= 3. */
     const uint32_t left_delta = (bpc_cpp + 7) >> 3;
     unsigned char *tmpu = (unsigned char*)tmp;
-    unsigned char *prev_rowu = tmpu + rlen1 * 5;
-    const unsigned char *pu, *puend;
-    memset(prev_rowu, '\0', rlen1);
-    tmpu[rlen1 * PNG_PR_NONE] = PNG_PR_NONE;
-    tmpu[rlen1 * PNG_PR_SUB] = PNG_PR_SUB;
-    tmpu[rlen1 * PNG_PR_UP] = PNG_PR_UP;
-    tmpu[rlen1 * PNG_PR_AVERAGE] = PNG_PR_AVERAGE;
-    tmpu[rlen1 * PNG_PR_PAETH] = PNG_PR_PAETH;
+    unsigned char *pu, *puend;
+    memset(tmpu + 1 + rlen * 5, '\0', rlen);  /* Previous row. */
+    /* !! Don't use tmpu. */
     for (; height > 0; img_data += rlen, --height) {
       uint32_t best_rowsum, rowsum, pi;
-      const unsigned char *best_predicted;
-      memcpy(tmpu + 1, img_data, rlen);
-      /* !! fewer multiplications and deltas */
-      for (i = 1; i < rlen1 && i <= left_delta; ++i) {
-        const unsigned char v = tmpu[i], vpr = prev_rowu[i];
-        tmpu[rlen1 * PNG_PR_SUB + i] = v;
+      unsigned char *best_predicted;
+      puend = (pu = tmpu + 1) + rlen;
+      memcpy(pu, img_data, rlen);
+      /* 1, 2 or 3 iterations of this loop. */
+      for (; pu != puend && pu - tmpu + 0U <= left_delta; ++pu) {
+        const unsigned char v = *pu, vpr = pu[rlen * 5];
+        pu += rlen; *pu = v;  /* PNG_PR_SUB */
+        pu += rlen; *pu = v - vpr;  /* PNG_PR_UP */
         /* It's important to use tmpu (not tmp) here. */
-        tmpu[rlen1 * PNG_PR_AVERAGE + i] = v - (vpr >> 1);
+        pu += rlen; *pu = v - (vpr >> 1);  /* PNG_PR_AVERAGE */
         /* It's important to use tmpu (not tmp) here. */
-        /* After the -, same as paeth_predictor(0, prev_rowu[i], 0); .*/
-        tmpu[rlen1 * PNG_PR_UP + i] =
-            tmpu[rlen1 * PNG_PR_PAETH + i] = v - vpr;
+        /* After the -, same as paeth_predictor(0, vpr, 0); .*/
+        pu += rlen; *pu = v - vpr;  /* PNG_PR_PAETH */
+        pu -= rlen * 4;
       }
-      for (; i < rlen1; ++i) {
-        const unsigned char v = tmpu[i], vpr = prev_rowu[i];
-        const unsigned char vpc = tmpu[i - left_delta];
-        tmpu[rlen1 * PNG_PR_UP + i] = v - vpr;
-        tmpu[rlen1 * PNG_PR_SUB + i] = v - vpc;
+      for (; pu != puend; ++pu) {
+        const unsigned char v = *pu, vpr = pu[rlen * 5];
+        const unsigned char vpc = pu[-left_delta];
+        pu += rlen; *pu = v - vpc;  /* PNG_PR_SUB */
+        pu += rlen; *pu = v - vpr;  /* PNG_PR_UP */
         /* It's important to use tmpu (not tmp) here. */
-        tmpu[rlen1 * PNG_PR_AVERAGE + i] = v - ((vpc + vpr) >> 1);
+        pu += rlen; *pu = v - ((vpc + vpr) >> 1);  /* PNG_PR_AVERAGE */
         /* It's important to use tmpu (not tmp) here. */
-        tmpu[rlen1 * PNG_PR_PAETH + i] = v - paeth_predictor(vpc, vpr, prev_rowu[i - left_delta]);
+        pu += rlen; *pu = v - paeth_predictor(vpc, vpr, pu[rlen - left_delta]);  /* PNG_PR_PAETH */
+        pu -= rlen * 4;
       }
-      memcpy(prev_rowu, tmpu, rlen1);  /* !! Do it without this. Is it possible? */
 
-      puend = (best_predicted = pu = tmpu) + rlen1;
-      for (++pu, best_rowsum = 0; pu != puend;) {
-        const signed char c = *pu++;
+      best_predicted = tmpu + 1;
+      /* Copy the current row as the previous row for the next iteration. */
+      memcpy(pu + rlen * 4, best_predicted, rlen);
+      for (best_rowsum = 0, pu = best_predicted; pu != puend; ++pu) {
+        const signed char c = *pu;
         /* It's important to use tmpu (not tmp) here. */
         best_rowsum += (signed char)c < 0 ? (c * -1) : c;
       }
       for (pi = 1; pi <= 4; ++pi) {
-        for (puend = pu + rlen1, rowsum = 0, ++pu; pu != puend;) {
-          const signed char c = *pu++;
+        for (puend = pu + rlen, rowsum = 0; pu != puend; ++pu) {
+          const signed char c = *pu;
           /* It's important to use tmpu (not tmp) here. */
           rowsum += (signed char)c < 0 ? (c * -1) : c;
         }
         if (rowsum < best_rowsum) {
           best_rowsum = rowsum;
-          best_predicted = pu - rlen1;
+          best_predicted = pu - rlen;
         }
       }
 
-      /* fprintf(stderr, "best_predictor=%d\n", best_predictor); */
+      /* !! Check that predictor selection and output is same as
+       * sam2p PNGPredictorAuto.
+       */
+      --best_predicted;
+      best_predicted[0] = (best_predicted - tmpu) / rlen;
+      fprintf(stderr, "best_predictor=%ld\n", (long)((best_predicted - tmpu) / rlen));
       crc32v = crc32(crc32v, (const Bytef*)best_predicted, rlen1);
       adler32v = adler32(adler32v, (const Bytef*)best_predicted, rlen1);
       fwrite((const char *)best_predicted, 1, rlen1, f);
-      size = add_check(size, rlen1);
     }
   } else {  /* No predictor (always PNG_PR_NONE). */
     buf[0] = PNG_PR_NONE;
@@ -247,9 +249,9 @@ static uint32_t write_png_img_data(
       fwrite(img_data, 1, rlen, f);
       crc32v = crc32(crc32v, (const Bytef*)img_data, rlen);
       adler32v = adler32(adler32v, (const Bytef*)img_data, rlen);
-      size = add_check(size, rlen1);
     }
   }
+  size = add_check(size, usize);
   put_u32be(buf, adler32v);
   crc32v = crc32(crc32v, (const Bytef*)buf, 4);
   put_u32be(buf + 4, crc32v);
@@ -261,7 +263,7 @@ static void write_png_end(FILE *f) {
   fwrite("\0\0\0\0IEND\xae""B`\x82", 1, 12, f);
 }
 
-/* tmp is preallocated to (rlen + 1) * 5 bytes. */
+/* tmp is preallocated to rlen * 6 + 1 bytes. */
 static void write_png(const char *filename, const char *img_data,
                       uint32_t width, uint32_t height,
                       char *tmp) {
@@ -306,7 +308,7 @@ int main(int argc, char **argv) {
   /* 1 for the predictor identifier in the row, 6 for the 5 predictors + copy
    * of the previous row.
    */
-  const uint32_t tmp_size = multiply_check(rlen + 1, 6);
+  const uint32_t tmp_size = add_check(multiply_check(rlen, 6), 1);
   char tmp[tmp_size];
   uint32_t x, y;
   char img_data2[height][width];
