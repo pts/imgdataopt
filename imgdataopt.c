@@ -1,6 +1,6 @@
 /* by pts@fazekas.hu at Mon Nov  6 18:50:40 CET 2017 */
 /* xstatic gcc -s -O2 -W -Wall -Wextra -Werror -o write_png write_png.c -lz */
-/* !! g++ */
+/* !! compile the final version with g++ */
 /* !! ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
 /* !! nonvalidating PNG parser: ignore checksums, including zlib adler32 */
 
@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <zlib.h>  /* crc32(), adler32(). */
+#include <zlib.h>  /* crc32(), adler32(), deflateInit(), deflate(), deflateEnd(). */
 
 typedef char xbool_t;
 
@@ -46,7 +46,7 @@ static void write_pgm(const char *filename, const char *img_data,
   if (!(f = fopen(filename, "wb"))) die("error writing pgm");
   fprintf(f, "P5 %lu %lu 255\n", (unsigned long)width, (unsigned long)height);
   p = img_data;
-  pend =  p + multiply_check(width, height);
+  pend = p + multiply_check(width, height);
   if (pend < p) die("image too large");
   for (; p != pend; ++p) {
     const char c = *p ? '\xff' : '\0';
@@ -161,37 +161,39 @@ static __inline unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
        : c;
 }
 
-/* Returns the payload size of the IDAT chunk. */
+/* Returns the payload size of the IDAT chunk.
+ * zip_level: 0 is uncompressed, 1..9 is compressed, 9 is maximum compression
+ *   (slow, but produces slow output).
+ */
 static uint32_t write_png_img_data(
     FILE *f, const char *img_data, register uint32_t rlen, uint32_t height,
-    char *tmp, uint8_t predictor_mode, uint8_t bpc_cpp) {
-  /* !! do it compressed instead. */
+    char *tmp, uint8_t predictor_mode, uint8_t bpc_cpp, uint8_t zip_level) {
   const uint32_t rlen1 = rlen + 1;
-  const uint32_t usize = predictor_mode == PM_NONE ?
-      multiply_check(rlen, height) : multiply_check(rlen1, height);
-  uint32_t size = 11;  /* "IDAT" "x\1" "\1" ... 4(adler32) */
-  uint32_t adler32v = 1;
-  uint32_t crc32v;
-  char buf[17];
+  char obuf[8192];
+  uint32_t crc32v = 900662814UL;  /* zlib.crc32("IDAT"). */
+  z_stream zs;
+  int zr;
+  uInt zoutsize;
   /* If more than 24 bits, then rowsum would overflow. */
   if (rlen >> 24) die("image rlen too large");
-  if (usize > 0xfb00) die("uncompressed image too large for flate block");
-  put_u32be(buf, 0);
-  memcpy(buf + 4, "IDATx\1\1", 7);
-  put_u16le(buf + 11, usize);
-  put_u16le(buf + 13, ~usize);
-  crc32v = crc32(0, (const Bytef*)(buf + 4), 11);
-  fwrite(buf, 1, 15, f);
+  zs.zalloc = Z_NULL;
+  zs.zfree = Z_NULL;
+  zs.opaque = Z_NULL;
+  /* !! Preallocate buffers in 1 big chunk, see deflateInit in sam2p. */
+  if (deflateInit(&zs, zip_level)) die("error in deflateInit");
+  fwrite("\0\0\0\0IDAT", 1, 8, f);
+  zs.next_in = (Bytef*)img_data;
+  zs.avail_in = 0;
   if (predictor_mode == PM_NONE) {
-    fwrite(img_data, 1, usize, f);
-    crc32v = crc32(crc32v, (const Bytef*)img_data, usize);
-    adler32v = adler32(adler32v, (const Bytef*)img_data, usize);
+    const uint32_t usize = multiply_check(rlen, height);
+    zs.avail_in = usize;  /* TODO(pts): Check for overflow. */
+    /* Z_FINISH below will do all the compression. */
   } else if (predictor_mode == PM_TIFF2) {
     /* Implemented in TIFFPredictor2::vi_write in encoder.cpp in sam2p. */
     die("TIFF2 predictor not supported");
   } else if (predictor_mode == PM_PNGAUTO) {
-    const uint32_t left_delta = (bpc_cpp + 7) >> 3;
-    /* Since 1 <= bpc_cpp <= 24, so 1 <= left_delta <= 3. */
+    const int32_t left_delta = -((bpc_cpp + 7) >> 3);
+    /* Since 1 <= bpc_cpp <= 24, so -3 <= left_delta <= -1. */
     memset(tmp + 1 + rlen * 5, '\0', rlen);  /* Previous row. */
     for (; height > 0; img_data += rlen, --height) {
       char *p, *pend, *best_predicted;
@@ -199,7 +201,7 @@ static uint32_t write_png_img_data(
       pend = (p = tmp + 1) + rlen;
       memcpy(p, img_data, rlen);  /* PNG_PR_NONE */
       /* 1, 2 or 3 iterations of this loop. */
-      for (; p != pend && p - tmp + 0U <= left_delta; ++p) {
+      for (; p != pend && tmp - p >= left_delta; ++p) {
         const unsigned char v = *p, vpr = p[rlen * 5];  /* Sign is important. */
         p += rlen; *p = v;  /* PNG_PR_SUB */
         p += rlen; *p = v - vpr;  /* PNG_PR_UP */
@@ -210,13 +212,13 @@ static uint32_t write_png_img_data(
       }
       for (; p != pend; ++p) {
         const unsigned char v = *p, vpr = p[rlen * 5];  /* Sign is important. */
-        const unsigned char vpc = p[-left_delta];  /* Sign is important. */
+        const unsigned char vpc = p[left_delta];  /* Sign is important. */
         p += rlen; *p = v - vpc;  /* PNG_PR_SUB */
         p += rlen; *p = v - vpr;  /* PNG_PR_UP */
         /* It's important to use tmp (not tmp) here. */
         p += rlen; *p = v - ((vpc + vpr) >> 1);  /* PNG_PR_AVERAGE */
         /* It's important to use tmp (not tmp) here. */
-        p += rlen; *p = v - paeth_predictor(vpc, vpr, ((unsigned char*)p)[rlen - left_delta]);  /* PNG_PR_PAETH */
+        p += rlen; *p = v - paeth_predictor(vpc, vpr, ((unsigned char*)p)[(int32_t)rlen + left_delta]);  /* PNG_PR_PAETH */
         p -= rlen * 4;
       }
 
@@ -245,29 +247,58 @@ static uint32_t write_png_img_data(
       --best_predicted;
       best_predicted[0] = (best_predicted - tmp) / rlen;
       /* fprintf(stderr, "best_predictor=%ld\n", (long)((best_predicted - tmp) / rlen)); */
-      crc32v = crc32(crc32v, (const Bytef*)best_predicted, rlen1);
-      adler32v = adler32(adler32v, (const Bytef*)best_predicted, rlen1);
-      fwrite((const char *)best_predicted, 1, rlen1, f);
+      zs.next_in = (Bytef*)best_predicted;
+      zs.avail_in = rlen1;
+      do {
+        zs.next_out = (Bytef*)obuf;
+        zs.avail_out = sizeof(obuf);
+        if (deflate(&zs, Z_NO_FLUSH) != Z_OK) die("deflate failed");
+        zoutsize = zs.next_out - (Bytef*)obuf;
+        crc32v = crc32(crc32v, (const Bytef*)obuf, zoutsize);
+        fwrite(obuf, 1, zoutsize, f);
+      } while (zs.avail_out == 0);
+      if (zs.avail_in != 0) die("deflate has not processed all input");
     }
   } else if (predictor_mode == PM_PNGNONE) {
-    buf[0] = PNG_PR_NONE;
     for (; height > 0; img_data += rlen, --height) {
-      fwrite(buf, 1, 1, f);
-      crc32v = crc32(crc32v, (const Bytef*)buf, 1);
-      adler32v = adler32(adler32v, (const Bytef*)buf, 1);
-      fwrite(img_data, 1, rlen, f);
-      crc32v = crc32(crc32v, (const Bytef*)img_data, rlen);
-      adler32v = adler32(adler32v, (const Bytef*)img_data, rlen);
+      char predictor = PNG_PR_NONE;
+      zs.next_in = (Bytef*)&predictor;
+      zs.avail_in = 1;
+      for (;;) {  /* Write the predictor; write rlen bytes from img_data. */
+        do {
+          zs.next_out = (Bytef*)obuf;
+          zs.avail_out = sizeof(obuf);
+          if (deflate(&zs, Z_NO_FLUSH) != Z_OK) die("deflate failed");
+          zoutsize = zs.next_out - (Bytef*)obuf;
+          crc32v = crc32(crc32v, (const Bytef*)obuf, zoutsize);
+          fwrite(obuf, 1, zoutsize, f);
+        } while (zs.avail_out == 0);
+        if (zs.avail_in != 0) die("deflate has not processed all input");
+        if (predictor != PNG_PR_NONE) break;
+        ++predictor;
+        zs.next_in = (Bytef*)img_data;
+        zs.avail_in = rlen;  /* TODO(pts): Check for overflow. */
+      }
     }
   } else {
     die("unknown predictor");
   }
-  size = add_check(size, usize);
-  put_u32be(buf, adler32v);
-  crc32v = crc32(crc32v, (const Bytef*)buf, 4);
-  put_u32be(buf + 4, crc32v);
-  fwrite(buf, 1, 8, f);
-  return size;
+  do {  /* Flush deflate output. */
+    zs.next_out = (Bytef*)obuf;
+    zs.avail_out = sizeof(obuf);
+    if ((zr = deflate(&zs, Z_FINISH)) != Z_STREAM_END && zr != Z_OK) {
+      die("deflate failed");
+    }
+    zoutsize = zs.next_out - (Bytef*)obuf;
+    crc32v = crc32(crc32v, (const Bytef*)obuf, zoutsize);
+    fwrite(obuf, 1, zoutsize, f);
+  } while (zr == Z_OK && zs.avail_out == 0);
+  if (zs.avail_in != 0) die("deflate has not processed all input");
+  deflateEnd(&zs);
+  /* No need to append zs.adler, deflate() does it for us. */
+  put_u32be(obuf, crc32v);
+  fwrite(obuf, 1, 4, f);
+  return zs.total_out;
 }
 
 static void write_png_end(FILE *f) {
@@ -279,7 +310,8 @@ static void write_png_end(FILE *f) {
  */
 static void write_png(const char *filename, const char *img_data,
                       uint32_t width, uint32_t height,
-                      char *tmp, xbool_t is_extended, uint8_t predictor_mode) {
+                      char *tmp, xbool_t is_extended, uint8_t predictor_mode,
+                      uint8_t zip_level) {
   const uint8_t bpc = 8;
   const uint8_t color_type = CT_INDEXED_RGB;
   uint8_t filter;
@@ -321,7 +353,7 @@ static void write_png(const char *filename, const char *img_data,
   write_png_header(f, width, height, bpc, color_type, filter);
   write_png_palette(f, palette, palette_size);
   idat_size = write_png_img_data(
-      f, img_data, rlen, height, tmp, predictor_mode, bpc_cpp);
+      f, img_data, rlen, height, tmp, predictor_mode, bpc_cpp, zip_level);
   write_png_end(f);
   if (fseek(f, idat_size_ofs, SEEK_SET)) die("error seeking to idat_size_ofs");
   put_u32be(buf, idat_size);
@@ -342,6 +374,7 @@ int main(int argc, char **argv) {
   const uint32_t tmp_size = add_check(multiply_check(rlen, 6), 1);
   const uint8_t predictor_mode = PM_PNGAUTO;
   const xbool_t is_extended = 0;
+  const uint8_t zip_level = 0;
   char tmp[tmp_size];
   uint32_t x, y;
   char img_data2[height][width];
@@ -359,6 +392,6 @@ int main(int argc, char **argv) {
   img_data = (const char*)(void*)img_data2;
   write_pgm("chess2.pgm", img_data, width, height);
   write_png("chess2.png", img_data, width, height, tmp,
-            is_extended, predictor_mode);
+            is_extended, predictor_mode, zip_level);
   return 0;
 }
