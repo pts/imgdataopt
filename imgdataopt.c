@@ -175,67 +175,61 @@ static uint32_t write_png_img_data(
   crc32v = crc32(0, (const Bytef*)(buf + 4), 11);
   fwrite(buf, 1, 15, f);
   if (is_predictor) {
-    /* Since 1 <= bpc_cpp <= 24, so 1 <= left_delta <= 3. */
     const uint32_t left_delta = (bpc_cpp + 7) >> 3;
-    unsigned char *tmpu = (unsigned char*)tmp;
-    unsigned char *pu, *puend;
-    memset(tmpu + 1 + rlen * 5, '\0', rlen);  /* Previous row. */
-    /* !! Don't use tmpu. */
+    /* Since 1 <= bpc_cpp <= 24, so 1 <= left_delta <= 3. */
+    memset(tmp + 1 + rlen * 5, '\0', rlen);  /* Previous row. */
     for (; height > 0; img_data += rlen, --height) {
+      char *p, *pend, *best_predicted;
       uint32_t best_rowsum, rowsum, pi;
-      unsigned char *best_predicted;
-      puend = (pu = tmpu + 1) + rlen;
-      memcpy(pu, img_data, rlen);
+      pend = (p = tmp + 1) + rlen;
+      memcpy(p, img_data, rlen);  /* PNG_PR_NONE */
       /* 1, 2 or 3 iterations of this loop. */
-      for (; pu != puend && pu - tmpu + 0U <= left_delta; ++pu) {
-        const unsigned char v = *pu, vpr = pu[rlen * 5];
-        pu += rlen; *pu = v;  /* PNG_PR_SUB */
-        pu += rlen; *pu = v - vpr;  /* PNG_PR_UP */
-        /* It's important to use tmpu (not tmp) here. */
-        pu += rlen; *pu = v - (vpr >> 1);  /* PNG_PR_AVERAGE */
-        /* It's important to use tmpu (not tmp) here. */
+      for (; p != pend && p - tmp + 0U <= left_delta; ++p) {
+        const unsigned char v = *p, vpr = p[rlen * 5];  /* Sign is important. */
+        p += rlen; *p = v;  /* PNG_PR_SUB */
+        p += rlen; *p = v - vpr;  /* PNG_PR_UP */
+        p += rlen; *p = v - (vpr >> 1);  /* PNG_PR_AVERAGE */
         /* After the -, same as paeth_predictor(0, vpr, 0); .*/
-        pu += rlen; *pu = v - vpr;  /* PNG_PR_PAETH */
-        pu -= rlen * 4;
+        p += rlen; *p = v - vpr;  /* PNG_PR_PAETH */
+        p -= rlen * 4;
       }
-      for (; pu != puend; ++pu) {
-        const unsigned char v = *pu, vpr = pu[rlen * 5];
-        const unsigned char vpc = pu[-left_delta];
-        pu += rlen; *pu = v - vpc;  /* PNG_PR_SUB */
-        pu += rlen; *pu = v - vpr;  /* PNG_PR_UP */
-        /* It's important to use tmpu (not tmp) here. */
-        pu += rlen; *pu = v - ((vpc + vpr) >> 1);  /* PNG_PR_AVERAGE */
-        /* It's important to use tmpu (not tmp) here. */
-        pu += rlen; *pu = v - paeth_predictor(vpc, vpr, pu[rlen - left_delta]);  /* PNG_PR_PAETH */
-        pu -= rlen * 4;
+      for (; p != pend; ++p) {
+        const unsigned char v = *p, vpr = p[rlen * 5];  /* Sign is important. */
+        const unsigned char vpc = p[-left_delta];  /* Sign is important. */
+        p += rlen; *p = v - vpc;  /* PNG_PR_SUB */
+        p += rlen; *p = v - vpr;  /* PNG_PR_UP */
+        /* It's important to use tmp (not tmp) here. */
+        p += rlen; *p = v - ((vpc + vpr) >> 1);  /* PNG_PR_AVERAGE */
+        /* It's important to use tmp (not tmp) here. */
+        p += rlen; *p = v - paeth_predictor(vpc, vpr, ((unsigned char*)p)[rlen - left_delta]);  /* PNG_PR_PAETH */
+        p -= rlen * 4;
       }
 
-      best_predicted = tmpu + 1;
+      best_predicted = tmp + 1;
       /* Copy the current row as the previous row for the next iteration. */
-      memcpy(pu + rlen * 4, best_predicted, rlen);
-      for (best_rowsum = 0, pu = best_predicted; pu != puend; ++pu) {
-        const signed char c = *pu;
-        /* It's important to use tmpu (not tmp) here. */
+      memcpy(p + rlen * 4, best_predicted, rlen);
+      for (best_rowsum = 0, p = best_predicted; p != pend; ++p) {
+        const signed char c = *p;  /* Sign is important. */
         best_rowsum += (signed char)c < 0 ? (c * -1) : c;
       }
       for (pi = 1; pi <= 4; ++pi) {
-        for (puend = pu + rlen, rowsum = 0; pu != puend; ++pu) {
-          const signed char c = *pu;
-          /* It's important to use tmpu (not tmp) here. */
+        for (pend = p + rlen, rowsum = 0; p != pend; ++p) {
+          const signed char c = *p;  /* Sign is important. */
           rowsum += (signed char)c < 0 ? (c * -1) : c;
         }
         if (rowsum < best_rowsum) {
           best_rowsum = rowsum;
-          best_predicted = pu - rlen;
+          best_predicted = p - rlen;
         }
       }
 
       /* !! Check that predictor selection and output is same as
-       * sam2p PNGPredictorAuto.
+       *    sam2p PNGPredictorAuto.
+       * !! Check RGB4 against Ghostscript, Evince etc.
        */
       --best_predicted;
-      best_predicted[0] = (best_predicted - tmpu) / rlen;
-      fprintf(stderr, "best_predictor=%ld\n", (long)((best_predicted - tmpu) / rlen));
+      best_predicted[0] = (best_predicted - tmp) / rlen;
+      /* fprintf(stderr, "best_predictor=%ld\n", (long)((best_predicted - tmp) / rlen)); */
       crc32v = crc32(crc32v, (const Bytef*)best_predicted, rlen1);
       adler32v = adler32(adler32v, (const Bytef*)best_predicted, rlen1);
       fwrite((const char *)best_predicted, 1, rlen1, f);
