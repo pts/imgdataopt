@@ -70,12 +70,19 @@ static void write_pgm(const char *filename, const char *img_data,
 #define PNG_FILTER_DEFAULT 0
 #define PNG_INTERLACE_NONE 0
 
-/* Predictors. */
+/* PNG predictors. */
 #define PNG_PR_NONE 0
 #define PNG_PR_SUB 1
 #define PNG_PR_UP 2
 #define PNG_PR_AVERAGE 3
 #define PNG_PR_PAETH 4
+
+/* Predictor modes. Same as sam2p -c:zip:... */
+#define PM_NONE 1
+#define PM_TIFF2 2
+#define PM_PNGNONE 10
+#define PM_PNGAUTO 15
+#define PM_SMART 25  /* Default of sam2p. */
 
 char *put_u32be(char *p, uint32_t k) {
   *p++ = k >> 24;
@@ -157,10 +164,11 @@ static __inline unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
 /* Returns the payload size of the IDAT chunk. */
 static uint32_t write_png_img_data(
     FILE *f, const char *img_data, register uint32_t rlen, uint32_t height,
-    char *tmp, xbool_t is_predictor, uint8_t bpc_cpp) {
+    char *tmp, uint8_t predictor_mode, uint8_t bpc_cpp) {
   /* !! do it compressed instead. */
   const uint32_t rlen1 = rlen + 1;
-  const uint32_t usize = multiply_check(rlen1, height);
+  const uint32_t usize = predictor_mode == PM_NONE ?
+      multiply_check(rlen, height) : multiply_check(rlen1, height);
   uint32_t size = 11;  /* "IDAT" "x\1" "\1" ... 4(adler32) */
   uint32_t adler32v = 1;
   uint32_t crc32v;
@@ -174,7 +182,14 @@ static uint32_t write_png_img_data(
   put_u16le(buf + 13, ~usize);
   crc32v = crc32(0, (const Bytef*)(buf + 4), 11);
   fwrite(buf, 1, 15, f);
-  if (is_predictor) {
+  if (predictor_mode == PM_NONE) {
+    fwrite(img_data, 1, usize, f);
+    crc32v = crc32(crc32v, (const Bytef*)img_data, usize);
+    adler32v = adler32(adler32v, (const Bytef*)img_data, usize);
+  } else if (predictor_mode == PM_TIFF2) {
+    /* Implemented in TIFFPredictor2::vi_write in encoder.cpp in sam2p. */
+    die("TIFF2 predictor not supported");
+  } else if (predictor_mode == PM_PNGAUTO) {
     const uint32_t left_delta = (bpc_cpp + 7) >> 3;
     /* Since 1 <= bpc_cpp <= 24, so 1 <= left_delta <= 3. */
     memset(tmp + 1 + rlen * 5, '\0', rlen);  /* Previous row. */
@@ -234,7 +249,7 @@ static uint32_t write_png_img_data(
       adler32v = adler32(adler32v, (const Bytef*)best_predicted, rlen1);
       fwrite((const char *)best_predicted, 1, rlen1, f);
     }
-  } else {  /* No predictor (always PNG_PR_NONE). */
+  } else if (predictor_mode == PM_PNGNONE) {
     buf[0] = PNG_PR_NONE;
     for (; height > 0; img_data += rlen, --height) {
       fwrite(buf, 1, 1, f);
@@ -244,6 +259,8 @@ static uint32_t write_png_img_data(
       crc32v = crc32(crc32v, (const Bytef*)img_data, rlen);
       adler32v = adler32(adler32v, (const Bytef*)img_data, rlen);
     }
+  } else {
+    die("unknown predictor");
   }
   size = add_check(size, usize);
   put_u32be(buf, adler32v);
@@ -257,13 +274,15 @@ static void write_png_end(FILE *f) {
   fwrite("\0\0\0\0IEND\xae""B`\x82", 1, 12, f);
 }
 
-/* tmp is preallocated to rlen * 6 + 1 bytes. */
+/* tmp is preallocated to rlen * 6 + 1 bytes.
+ * If is_extended is true, that can produce an invalid PNG (e.g. with PM_NONE).
+ */
 static void write_png(const char *filename, const char *img_data,
                       uint32_t width, uint32_t height,
-                      char *tmp) {
+                      char *tmp, xbool_t is_extended, uint8_t predictor_mode) {
   const uint8_t bpc = 8;
   const uint8_t color_type = CT_INDEXED_RGB;
-  const uint8_t filter = PNG_FILTER_DEFAULT;
+  uint8_t filter;
   const uint8_t bpc_cpp = bpc * (color_type == CT_RGB ? 3 : 1);
   const uint32_t samples_per_row =
       add0_check(color_type == CT_RGB ? multiply_check(width, 3) : width, 2);
@@ -276,15 +295,33 @@ static void write_png(const char *filename, const char *img_data,
   const uint32_t palette_size = 6;  /* Must be (uint32_t)-1 if no palette. */
   const uint32_t idat_size_ofs = palette_size == (uint32_t)-1 ?
       33 : add_check(45, palette_size);
-  const xbool_t is_predictor = 1;
   uint32_t idat_size;
   FILE *f;
   char buf[4];
+
+  if (predictor_mode < PM_NONE) {
+    predictor_mode = PM_NONE;
+  } else if (predictor_mode == PM_SMART) {
+    predictor_mode =
+        /* This condition comes from the is_predictor_recommended = ...
+         * assignment in sam2p 0.49.4, which comes from the do_filter = ...
+         * assignment in png_write_IHDR() in pngwutil.c of libpng-1.2.15 .
+         */
+        bpc == 8 && (color_type == CT_RGB || color_type == CT_GRAY) ?
+        PM_PNGAUTO : PM_NONE;
+  }
+  if (!is_extended && predictor_mode != PM_PNGAUTO) {
+    predictor_mode = PM_PNGNONE;
+  }
+  /* Only PNG_FILTER_DEFAULT (0) is standard PNG. 1 is PM_NONE, 2 is PM_TIFF2.
+   */
+  filter = predictor_mode < PM_PNGNONE ? predictor_mode : PNG_FILTER_DEFAULT;
+
   if (!(f = fopen(filename, "wb"))) die("error writing png");
   write_png_header(f, width, height, bpc, color_type, filter);
   write_png_palette(f, palette, palette_size);
   idat_size = write_png_img_data(
-      f, img_data, rlen, height, tmp, is_predictor, bpc_cpp);
+      f, img_data, rlen, height, tmp, predictor_mode, bpc_cpp);
   write_png_end(f);
   if (fseek(f, idat_size_ofs, SEEK_SET)) die("error seeking to idat_size_ofs");
   put_u32be(buf, idat_size);
@@ -303,6 +340,8 @@ int main(int argc, char **argv) {
    * of the previous row.
    */
   const uint32_t tmp_size = add_check(multiply_check(rlen, 6), 1);
+  const uint8_t predictor_mode = PM_PNGAUTO;
+  const xbool_t is_extended = 0;
   char tmp[tmp_size];
   uint32_t x, y;
   char img_data2[height][width];
@@ -319,6 +358,7 @@ int main(int argc, char **argv) {
   }
   img_data = (const char*)(void*)img_data2;
   write_pgm("chess2.pgm", img_data, width, height);
-  write_png("chess2.png", img_data, width, height, tmp);
+  write_png("chess2.png", img_data, width, height, tmp,
+            is_extended, predictor_mode);
   return 0;
 }
