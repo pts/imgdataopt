@@ -1,5 +1,5 @@
 /* by pts@fazekas.hu at Mon Nov  6 18:50:40 CET 2017 */
-/* xstatic gcc -s -O2 -W -Wall -Wextra -Werror -o write_png write_png.c -lz */
+/* xstatic gcc -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -lz */
 /* !! compile the final version with g++ */
 /* !! ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
 /* !! nonvalidating PNG parser: ignore checksums, including zlib adler32 */
@@ -37,15 +37,92 @@ static uint32_t multiply_check(uint32_t a, uint32_t b) {
   return result;
 }
 
+static void *xmalloc(size_t size) {
+  void *result;
+  if (size == 0) return NULL;
+  if (!(result = malloc(size))) die("out of memory");
+  return result;
+}
+
+/* --- */
+
+/* color_type constants. Must be same as PNG. */
+#define CT_GRAY 0
+#define CT_RGB 2
+#define CT_INDEXED_RGB 3
+#define CT_GRAY_ALPHA 4  /* Not supported by imgdataopt. */
+#define CT_RGB_ALPHA 6   /* Not supported by imgdataopt. */
+
+typedef struct Image {
+  uint32_t width;
+  uint32_t height;
+  /* Computed from width, bpc and cpp.
+   * It's guaranteed that rlen * height first to an uint32_t.
+   */
+  uint32_t rlen;
+  /* p[:rlen * height] contains image data. */
+  char *data;
+  /* At most 3 * 256 bytes, RGB... format. */
+  char *palette;
+  /* Number of bytes in the palette (between 3 and 256 * 3), or
+   * 0 if no palette.
+   */
+  uint32_t palette_size;
+  /* Bits per color component. At most 85, typically 1, 2, 4 or 8. */
+  uint8_t bpc;
+  /* CT_... */
+  uint8_t color_type;
+  /* Computed from color_type. */
+  uint8_t cpp; 
+} Image;
+
+static void alloc_image(
+    Image *img, uint32_t width, uint32_t height, uint8_t bpc,
+    uint8_t color_type, uint32_t palette_size) {
+  const uint8_t cpp = (color_type == CT_RGB ? 3 : 1);
+  const uint32_t samples_per_row =
+      add0_check(color_type == CT_RGB ? multiply_check(width, 3) : width, 2);
+  /* Number of bytes in a row. */
+  const uint32_t rlen = bpc == 8 ? samples_per_row :
+      bpc == 4 ? ((samples_per_row + 1) >> 1) :
+      bpc == 2 ? ((samples_per_row + 3) >> 2) :
+      bpc == 1 ? ((samples_per_row + 7) >> 3) : 0;
+  add_check(multiply_check(rlen, 7), 1);  /* Early upper limit. */
+  img->width = width;
+  img->height = height;
+  img->rlen = rlen;
+  img->bpc = bpc;
+  img->color_type = color_type;
+  img->cpp = cpp;
+  if (palette_size == 0 && color_type == CT_INDEXED_RGB) palette_size = 3 * 256;
+  if (palette_size != 0 && color_type != CT_INDEXED_RGB) palette_size = 0;
+  img->palette_size = palette_size;
+  img->data = (char*)xmalloc(multiply_check(rlen, height));
+  img->palette = (char*)xmalloc(palette_size);
+}
+
+static __inline__ void dealloc_image(Image *img) {
+  free(img->data); img->data = NULL;
+  free(img->palette); img->palette = NULL;
+}
+
 /* --- PNM */
 
-static void write_pgm(const char *filename, const char *img_data,
-                      uint32_t width, uint32_t height) {
+/* !! Remove PNM functinality */
+
+/* We relax: we don't check img->color_type == GRAY. */
+static void write_pnm(const char *filename, const Image *img) {
+  const uint32_t width = img->width;
+  const uint32_t height = img->height;
   const char *p, *pend;
   FILE *f;
+  if (img->bpc != 8) die("need bpc=8 for writing pgm/ppm");
+  if (img->cpp != 1 && img->cpp != 3) die("need cpp=1 or =3 for writing pgm/ppm");
   if (!(f = fopen(filename, "wb"))) die("error writing pgm");
-  fprintf(f, "P5 %lu %lu 255\n", (unsigned long)width, (unsigned long)height);
-  p = img_data;
+  fprintf(f, "%s%lu %lu 255\n",
+         img->cpp == 3 ? "P6 " : "P5 ",
+         (unsigned long)width, (unsigned long)height);
+  p = img->data;
   pend = p + multiply_check(width, height);
   if (pend < p) die("image too large");
   for (; p != pend; ++p) {
@@ -58,13 +135,6 @@ static void write_pgm(const char *filename, const char *img_data,
 }
 
 /* --- PNG */
-
-/* color_type constants. */
-#define CT_GRAY 0
-#define CT_RGB 2
-#define CT_INDEXED_RGB 3
-#define CT_GRAY_ALPHA 4  /* Not supported by imgdataopt. */
-#define CT_RGB_ALPHA 6   /* Not supported by imgdataopt. */
 
 #define PNG_COMPRESSION_DEFAULT 0
 #define PNG_FILTER_DEFAULT 0
@@ -106,38 +176,6 @@ char *put_u16le(char *p, uint16_t k) {
   return p;
 }
 
-static void write_png_header(
-    FILE *f,
-    uint32_t width, uint32_t height, uint8_t bpc, uint8_t color_type,
-    uint8_t filter) {
-  char buf[33], *p = buf;
-  memcpy(p, "\x89PNG\r\n\x1a\n\0\0\0\rIHDR", 16); p += 16;
-  p = put_u32be(p, width);
-  p = put_u32be(p, height);
-  *p++ = bpc;
-  *p++ = color_type;
-  *p++ = PNG_COMPRESSION_DEFAULT;
-  *p++ = filter;
-  *p++ = PNG_INTERLACE_NONE;
-  put_u32be(p, crc32(0, (const Bytef*)(buf + 12), 17));
-  fwrite(buf, 1, 33, f);
-}
-
-/* size is the number of bytes in the palette, typically 3 * color_count.
- * data[:size] looks like RGBRGBRGB...
- */
-static void write_png_palette(
-    FILE *f, const char *data, uint32_t size) {
-  const uint32_t crc32v_plte = 1269336405UL;  /* crc32(0, "PLTE", 4). */
-  char buf[8];
-  put_u32be(buf, size);
-  memcpy(buf + 4, "PLTE", 4);
-  fwrite(buf, 1, 8, f);
-  fwrite(data, 1, size, f);
-  put_u32be(buf, crc32(crc32v_plte, (const Bytef*)data, size));
-  fwrite(buf, 1, 4, f);
-}
-
 /* Using i * -1 instead of -i because egcs-2.91.60 is buggy. */
 static __inline__ unsigned absu(unsigned i) {
   return ((signed)i)<0 ? (i * -1) : i;
@@ -167,7 +205,7 @@ static __inline unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
  */
 static uint32_t write_png_img_data(
     FILE *f, const char *img_data, register uint32_t rlen, uint32_t height,
-    char *tmp, uint8_t predictor_mode, uint8_t bpc_cpp, uint8_t zip_level) {
+    uint8_t predictor_mode, uint8_t bpc_cpp, uint8_t zip_level) {
   const uint32_t rlen1 = rlen + 1;
   char obuf[8192];
   uint32_t crc32v = 900662814UL;  /* zlib.crc32("IDAT"). */
@@ -176,7 +214,7 @@ static uint32_t write_png_img_data(
   uInt zoutsize;
   /* If more than 24 bits, then rowsum would overflow. */
   if (rlen >> 24) die("image rlen too large");
-  zs.zalloc = Z_NULL;
+  zs.zalloc = Z_NULL;  /* void (*)(voidpf opaque, uInt items, uInt size) */
   zs.zfree = Z_NULL;
   zs.opaque = Z_NULL;
   /* !! Preallocate buffers in 1 big chunk, see deflateInit in sam2p. */
@@ -192,6 +230,10 @@ static uint32_t write_png_img_data(
     /* Implemented in TIFFPredictor2::vi_write in encoder.cpp in sam2p. */
     die("TIFF2 predictor not supported");
   } else if (predictor_mode == PM_PNGAUTO) {
+    /* 1 for the predictor identifier in the row, 6 for the 5 predictors + copy
+     * of the previous row.
+     */
+    char *tmp = (char*)xmalloc(add_check(multiply_check(rlen, 6), 1));
     const int32_t left_delta = -((bpc_cpp + 7) >> 3);
     /* Since 1 <= bpc_cpp <= 24, so -3 <= left_delta <= -1. */
     memset(tmp + 1 + rlen * 5, '\0', rlen);  /* Previous row. */
@@ -259,6 +301,7 @@ static uint32_t write_png_img_data(
       } while (zs.avail_out == 0);
       if (zs.avail_in != 0) die("deflate has not processed all input");
     }
+    free(tmp);
   } else if (predictor_mode == PM_PNGNONE) {
     for (; height > 0; img_data += rlen, --height) {
       char predictor = PNG_PR_NONE;
@@ -301,6 +344,38 @@ static uint32_t write_png_img_data(
   return zs.total_out;
 }
 
+static void write_png_header(
+    FILE *f,
+    uint32_t width, uint32_t height, uint8_t bpc, uint8_t color_type,
+    uint8_t filter) {
+  char buf[33], *p = buf;
+  memcpy(p, "\x89PNG\r\n\x1a\n\0\0\0\rIHDR", 16); p += 16;
+  p = put_u32be(p, width);
+  p = put_u32be(p, height);
+  *p++ = bpc;
+  *p++ = color_type;
+  *p++ = PNG_COMPRESSION_DEFAULT;
+  *p++ = filter;
+  *p++ = PNG_INTERLACE_NONE;
+  put_u32be(p, crc32(0, (const Bytef*)(buf + 12), 17));
+  fwrite(buf, 1, 33, f);
+}
+
+/* size is the number of bytes in the palette, typically 3 * color_count.
+ * data[:size] looks like RGBRGBRGB...
+ */
+static void write_png_palette(
+    FILE *f, const char *data, uint32_t size) {
+  const uint32_t crc32v_plte = 1269336405UL;  /* crc32(0, "PLTE", 4). */
+  char buf[8];
+  put_u32be(buf, size);
+  memcpy(buf + 4, "PLTE", 4);
+  fwrite(buf, 1, 8, f);
+  fwrite(data, 1, size, f);
+  put_u32be(buf, crc32(crc32v_plte, (const Bytef*)data, size));
+  fwrite(buf, 1, 4, f);
+}
+
 static void write_png_end(FILE *f) {
   fwrite("\0\0\0\0IEND\xae""B`\x82", 1, 12, f);
 }
@@ -308,25 +383,14 @@ static void write_png_end(FILE *f) {
 /* tmp is preallocated to rlen * 6 + 1 bytes.
  * If is_extended is true, that can produce an invalid PNG (e.g. with PM_NONE).
  */
-static void write_png(const char *filename, const char *img_data,
-                      uint32_t width, uint32_t height,
-                      char *tmp, xbool_t is_extended, uint8_t predictor_mode,
+static void write_png(const char *filename, const Image *img,
+                      xbool_t is_extended, uint8_t predictor_mode,
                       uint8_t zip_level) {
-  const uint8_t bpc = 8;
-  const uint8_t color_type = CT_INDEXED_RGB;
+  const uint8_t bpc = img->bpc;
+  const uint8_t color_type = img->color_type;
   uint8_t filter;
-  const uint8_t bpc_cpp = bpc * (color_type == CT_RGB ? 3 : 1);
-  const uint32_t samples_per_row =
-      add0_check(color_type == CT_RGB ? multiply_check(width, 3) : width, 2);
-  /* Number of bytes in a row. */
-  const uint32_t rlen = bpc == 8 ? samples_per_row :
-      bpc == 4 ? ((samples_per_row + 1) >> 1) :
-      bpc == 2 ? ((samples_per_row + 3) >> 2) :
-      bpc == 1 ? ((samples_per_row + 7) >> 3) : 0;
-  const char * const palette = "\0\0\0\xff\xff\xff";
-  const uint32_t palette_size = 6;  /* Must be (uint32_t)-1 if no palette. */
-  const uint32_t idat_size_ofs = palette_size == (uint32_t)-1 ?
-      33 : add_check(45, palette_size);
+  const uint32_t idat_size_ofs = img->palette_size == 0 ?
+      33 : add_check(45, img->palette_size);
   uint32_t idat_size;
   FILE *f;
   char buf[4];
@@ -350,10 +414,13 @@ static void write_png(const char *filename, const char *img_data,
   filter = predictor_mode < PM_PNGNONE ? predictor_mode : PNG_FILTER_DEFAULT;
 
   if (!(f = fopen(filename, "wb"))) die("error writing png");
-  write_png_header(f, width, height, bpc, color_type, filter);
-  write_png_palette(f, palette, palette_size);
+  write_png_header(f, img->width, img->height, bpc, color_type, filter);
+  if (img->palette_size > 0) {
+    write_png_palette(f, img->palette, img->palette_size);
+  }
   idat_size = write_png_img_data(
-      f, img_data, rlen, height, tmp, predictor_mode, bpc_cpp, zip_level);
+      f, img->data, img->rlen, img->height, predictor_mode,
+      img->bpc * img->cpp, zip_level);
   write_png_end(f);
   if (fseek(f, idat_size_ofs, SEEK_SET)) die("error seeking to idat_size_ofs");
   put_u32be(buf, idat_size);
@@ -367,31 +434,31 @@ static void write_png(const char *filename, const char *img_data,
 
 int main(int argc, char **argv) {
   const uint32_t width = 91, height = 84;
-  const uint32_t rlen = width;  /* !! */
-  /* 1 for the predictor identifier in the row, 6 for the 5 predictors + copy
-   * of the previous row.
-   */
-  const uint32_t tmp_size = add_check(multiply_check(rlen, 6), 1);
+  static const char palette[] = "\0\0\0\xff\xff\xff";
+  Image img;
   const uint8_t predictor_mode = PM_PNGAUTO;
   const xbool_t is_extended = 0;
   const uint8_t zip_level = 0;
-  char tmp[tmp_size];
-  uint32_t x, y;
-  char img_data2[height][width];
-  const char *img_data;
+
+  alloc_image(&img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1);
+  memcpy(img.palette, palette, sizeof(palette) - 1);
 
   (void)argc; (void)argv;
 
-  for (y = 0; y < height; ++y) {
-    for (x = 0; x < width; ++x) {
-      img_data2[y][x] = (x == 1 || x == 82 || y == 1 || y == 82) ||
-                        (x >= 2 && x < 82 && y >= 2 && y < 82 &&
-                         ((x + 8) / 10 + (y + 8) / 10) % 2);
+  {  /* Fill the image */
+    uint32_t x, y;
+    char (*img_data)[height][width] = (char(*)[height][width])img.data;
+    for (y = 0; y < height; ++y) {
+      for (x = 0; x < width; ++x) {
+        (*img_data)[y][x] = (x == 1 || x == 82 || y == 1 || y == 82) ||
+                             (x >= 2 && x < 82 && y >= 2 && y < 82 &&
+                             ((x + 8) / 10 + (y + 8) / 10) % 2);
+      }
     }
   }
-  img_data = (const char*)(void*)img_data2;
-  write_pgm("chess2.pgm", img_data, width, height);
-  write_png("chess2.png", img_data, width, height, tmp,
-            is_extended, predictor_mode, zip_level);
+  write_pnm("chess2.pgm", &img);
+  write_png("chess2.png", &img, is_extended, predictor_mode, zip_level);
+  dealloc_image(&img);
+
   return 0;
 }
