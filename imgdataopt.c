@@ -73,8 +73,13 @@ typedef struct Image {
   /* CT_... */
   uint8_t color_type;
   /* Computed from color_type. */
-  uint8_t cpp; 
+  uint8_t cpp;
 } Image;
+
+static void noalloc_image(Image *img) __attribute__((used));  /* !! */
+static void noalloc_image(Image *img) {
+  img->data = img->palette = NULL;
+}
 
 static void alloc_image(
     Image *img, uint32_t width, uint32_t height, uint8_t bpc,
@@ -154,6 +159,15 @@ static void write_pnm(const char *filename, const Image *img) {
 #define PM_PNGAUTO 15
 #define PM_SMART 25  /* Default of sam2p. */
 
+uint32_t get_u32be(char *p) {
+  register unsigned char *pu = (unsigned char *)p;
+  register uint32_t result = *pu++;
+  result = result << 8 | *pu++;
+  result = result << 8 | *pu++;
+  result = result << 8 | *pu;
+  return result;
+}
+
 char *put_u32be(char *p, uint32_t k) {
   *p++ = k >> 24;
   *p++ = k >> 16;
@@ -200,12 +214,12 @@ static __inline unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
 }
 
 /* Returns the payload size of the IDAT chunk.
- * zip_level: 0 is uncompressed, 1..9 is compressed, 9 is maximum compression
+ * flate_level: 0 is uncompressed, 1..9 is compressed, 9 is maximum compression
  *   (slow, but produces slow output).
  */
 static uint32_t write_png_img_data(
     FILE *f, const char *img_data, register uint32_t rlen, uint32_t height,
-    uint8_t predictor_mode, uint8_t bpc_cpp, uint8_t zip_level) {
+    uint8_t predictor_mode, uint8_t bpc_cpp, uint8_t flate_level) {
   const uint32_t rlen1 = rlen + 1;
   char obuf[8192];
   uint32_t crc32v = 900662814UL;  /* zlib.crc32("IDAT"). */
@@ -217,8 +231,8 @@ static uint32_t write_png_img_data(
   zs.zalloc = Z_NULL;  /* void (*)(voidpf opaque, uInt items, uInt size) */
   zs.zfree = Z_NULL;
   zs.opaque = Z_NULL;
-  /* !! Preallocate buffers in 1 big chunk, see deflateInit in sam2p. */
-  if (deflateInit(&zs, zip_level)) die("error in deflateInit");
+  /* !! Preallocate buffers in 1 big chunk, see deflateInit in sam2p. Everywhere. */
+  if (deflateInit(&zs, flate_level)) die("error in deflateInit");
   fwrite("\0\0\0\0IDAT", 1, 8, f);
   zs.next_in = (Bytef*)img_data;
   zs.avail_in = 0;
@@ -344,12 +358,14 @@ static uint32_t write_png_img_data(
   return zs.total_out;
 }
 
+static const char kPngHeader[16 + 1] = "\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
 static void write_png_header(
     FILE *f,
     uint32_t width, uint32_t height, uint8_t bpc, uint8_t color_type,
     uint8_t filter) {
   char buf[33], *p = buf;
-  memcpy(p, "\x89PNG\r\n\x1a\n\0\0\0\rIHDR", 16); p += 16;
+  memcpy(p, kPngHeader, 16); p += 16;
   p = put_u32be(p, width);
   p = put_u32be(p, height);
   *p++ = bpc;
@@ -385,7 +401,7 @@ static void write_png_end(FILE *f) {
  */
 static void write_png(const char *filename, const Image *img,
                       xbool_t is_extended, uint8_t predictor_mode,
-                      uint8_t zip_level) {
+                      uint8_t flate_level) {
   const uint8_t bpc = img->bpc;
   const uint8_t color_type = img->color_type;
   uint8_t filter;
@@ -420,13 +436,204 @@ static void write_png(const char *filename, const Image *img,
   }
   idat_size = write_png_img_data(
       f, img->data, img->rlen, img->height, predictor_mode,
-      img->bpc * img->cpp, zip_level);
+      img->bpc * img->cpp, flate_level);
   write_png_end(f);
   if (fseek(f, idat_size_ofs, SEEK_SET)) die("error seeking to idat_size_ofs");
   put_u32be(buf, idat_size);
   fwrite(buf, 1, 4, f);
   fflush(f);
   if (ferror(f)) die("error writing png");
+  fclose(f);
+}
+
+/* img must be initialized (at least noalloc_image). */
+static void read_png(const char *filename, Image *img) {
+  uint32_t width, height, palette_size = 0;
+  uint8_t bpc, color_type, filter;
+  /* Must be large enough for the PNG header (33 bytes), for the palette (3
+   * * 256 bytes), and must be fast enough for inflate, and must be at least
+   * 4 bytes (adler32 checksum size) for inflate.
+   */
+  char buf[8192], *p;
+  unsigned char *dp0 = 0;
+  register unsigned char *dp = NULL;
+  char predictor;
+  uint32_t d_remaining = (uint32_t)-1, rlen = 0;
+  int32_t left_delta_inv = 0;
+  FILE *f;
+  z_stream zs;
+  int zr = Z_OK;
+  xbool_t do_one_more_inflate = 1;
+  if (!(f = fopen(filename, "rb"))) die("error reading png");
+  if (33 != fread(buf, 1, 33, f)) die("png too short");
+  /* https://tools.ietf.org/rfc/rfc2083.txt */
+  if (0 != memcmp(buf, kPngHeader, 16)) die("bad signature in png");
+  if (crc32(0, (const Bytef*)buf + 12, 17) != get_u32be(buf + 29)) {
+    die("crc error in png ihdr");
+  }
+  dealloc_image(img);
+  width = get_u32be(buf + 16);
+  if ((int32_t)width <= 0) die("bad png width");
+  height = get_u32be(buf + 20);
+  if ((int32_t)height <= 0) die("bad png height");
+  p = buf + 24;
+  bpc = *p++;
+  if (bpc == 16) die("not supported png bpc");
+  if (bpc != 1 && bpc != 2 && bpc != 4 && bpc != 8) die("bad png bpc");
+  color_type = *p++;
+  if (color_type != CT_GRAY && color_type != CT_RGB &&
+      color_type != CT_INDEXED_RGB) die("bad png color_type");
+  if (*p++ != PNG_COMPRESSION_DEFAULT) die("bad png compression");
+  filter = *p++;
+  /* PNG supports filter == 0 only; 1 and 2 are imgdataopt extensions. */
+  if (filter != PNG_FILTER_DEFAULT && filter != PM_NONE && filter != PM_TIFF2) die("bad png filter");
+  if (filter == PM_TIFF2) die("TIFF2 predictor not supported");
+  if (*p++ != PNG_INTERLACE_NONE) die("not supported png interlace");
+  for (;;) {
+    uint32_t chunk_size;
+    if (8 != fread(buf, 1, 8, f)) die("eof in png chunk header");
+    chunk_size = get_u32be(buf);
+    p = buf + 4;
+    {
+      /* We ignore every other chunk (such as gamma correction with gAMA and
+       * transparency in tRNS), so this code is not suitable as a
+       * general-purpose PNG renderer.
+       */
+      const xbool_t is_plte = 0 == memcmp(p, "PLTE", 4);
+      const xbool_t is_idat = 0 == memcmp(p, "IDAT", 4);
+      const xbool_t is_iend = 0 == memcmp(p, "IEND", 4);
+      uint32_t crc32v = crc32(0, (const Bytef*)p, 4);
+      if (is_plte) {
+        if (img->data) die("png palette too late");
+        if (chunk_size == 0 || chunk_size > 3 * 256 || chunk_size % 3 != 0) {
+          die("bad png palette size");
+        }
+        if (palette_size != 0) die("dupicate png palette");
+        img->palette_size = palette_size = chunk_size;
+        alloc_image(img, width, height, bpc, color_type, palette_size);
+        left_delta_inv = ((bpc * img->cpp + 7) >> 3);
+      }
+      if (is_idat && !img->data) {
+        /* PNG requires that PLTE is appears after IDAT. */
+        if (color_type == CT_INDEXED_RGB) die("missing png palette");
+        alloc_image(img, width, height, bpc, color_type, 0);
+        left_delta_inv = ((bpc * img->cpp + 7) >> 3);
+      }
+      while (chunk_size > 0) {
+        const uint32_t want = chunk_size < sizeof(buf) ?
+            chunk_size : sizeof(buf);
+        if (want != fread(buf, 1, want, f)) die("eof in png chunk");
+        if (is_plte) {
+          if (want != palette_size) die("ASSERT: png palette buf too small");
+          memcpy(img->palette, buf, palette_size);
+        } else if (is_idat) {
+          if (!dp) {
+            zs.zalloc = Z_NULL;
+            zs.zfree = Z_NULL;
+            zs.opaque = Z_NULL;
+            if (inflateInit(&zs)) die("error in deflateInit");
+            dp = dp0 = (unsigned char*)img->data;
+            /* Overflow already checked by alloc_image. */
+            rlen = img->rlen;
+            d_remaining = rlen * img->height;  /* Not 0, checked by alloc_image. */
+            if (filter == PNG_FILTER_DEFAULT) {
+              zs.next_out = (Bytef*)&predictor;
+              zs.avail_out = 1;
+            } else {
+              zs.next_out = (Bytef*)dp;
+              zs.avail_out = d_remaining;  /* TODO(pts): Check for overflow. */
+            }
+          }
+          /* There was an error or EOF before, we can't inflate anymore. */
+          zs.next_in = (Bytef*)buf;
+          zs.avail_in = want;
+          if (d_remaining == 0 && zr == Z_OK && do_one_more_inflate) {
+            /* Do one more inflate, so that it can process the adler32 checksum. */
+            do_one_more_inflate = 0;
+            zs.next_out = (Bytef*)&predictor;
+            zs.avail_out = 1;
+            zr = inflate(&zs, Z_NO_FLUSH);
+            if (zr != Z_OK && zr != Z_STREAM_END && zr != Z_DATA_ERROR) {
+              die("inflate failed");
+            }
+          }
+          while (zr == Z_OK && zs.avail_in != 0 && d_remaining != 0) {
+            zr = inflate(&zs, Z_NO_FLUSH);
+            if (zr != Z_OK && zr != Z_STREAM_END && zr != Z_DATA_ERROR) {
+              die("inflate failed");
+            }
+            /* TODO(pts): Process a row partially if there is an EOD. */
+            if (zs.avail_out != 0) {
+            } else if (zs.next_out == (Bytef*)(&predictor + 1)) {
+              if ((unsigned char)predictor > 4) die("bad png predictor");
+              zs.next_out = (Bytef*)dp;
+              zs.avail_out = rlen;
+            } else if (filter != PNG_FILTER_DEFAULT) {  /* PM_NONE */
+              d_remaining = 0;
+            } else {
+              /* Now we've predictor and dp[:rlen] as the current row ready. */
+              unsigned char *dpleft = dp + left_delta_inv;
+              unsigned char *dpend = dp + rlen;
+              register unsigned char *dr, *dc;
+              switch (predictor) {
+               case PNG_PR_SUB: do_sub:
+                if ((uint32_t)left_delta_inv < rlen) {
+                  for (dc = dp, dp += left_delta_inv; dp != dpend; *dp++ += *dc++) {}
+                }
+                break;
+               case PNG_PR_UP:
+                if (dp != dp0) {  /* Skip it in the first row. */
+                  for (dr = dp - rlen; dp != dpend; *dp++ += *dr++) {}
+                }
+                break;
+               case PNG_PR_AVERAGE:
+                /* It's important here that dr and dc are _unsigned_ char* */
+                if (dp == dp0) {  /* First row. */
+                  for (; dp != dpend && dp != dpleft; ++dp) {}
+                  for (dc = dp - left_delta_inv; dp != dpend; *dp++ += *dc++ >> 1) {}
+                } else {
+                  for (dr = dp - rlen; dp != dpend && dp != dpleft; *dp++ += *dr++ >> 1) {}
+                  for (dc = dp - left_delta_inv; dp != dpend; *dp++ += (*dc++ + *dr++) >> 1) {}
+                }
+                break;
+               case PNG_PR_PAETH:
+                /* It's important here that dr and dc are _unsigned_ char* */
+                if (dp == dp0) goto do_sub;  /* First row. */
+                for (dr = dp - rlen; dp != dpend && dp != dpleft; *dp++ += *dr++) {}
+                for (dc = dp - left_delta_inv; dp != dpend; *dp++ += paeth_predictor(*dc++, *dr, *(dr - left_delta_inv)), ++dr) {}
+                break;
+               default: ; /* No special action needed for PNG_PR_NONE. */
+                dp = dpend;
+              }
+              d_remaining -= rlen;
+              zs.next_out = (Bytef*)&predictor;
+              zs.avail_out = d_remaining != 0;
+            }
+          }
+        }
+        crc32v = crc32(crc32v, (const Bytef*)buf, want);
+        chunk_size -= want;
+      }
+      if (4 != fread(buf, 1, 4, f)) die("eof in png chunk crc");
+      if (crc32v != get_u32be(buf)) die("crc error in png chunk");
+      if (is_iend) break;
+    }
+  }
+  if (!img->data) die("missing png image data");
+  if (zr == Z_DATA_ERROR) {
+    fprintf(stderr, "warning: bad png image data or bad adler32\n");
+  }
+  if (d_remaining == 0) {
+    if (dp && zr == Z_OK && (zs.avail_in != 0 || zs.avail_out != 0)) {  /* Not Z_STREAM_END. */
+      fprintf(stderr, "warning: png image data too long\n");
+    }
+  } else {
+    fprintf(stderr, "warning: png image data too short\n");
+    /* TODO(pts): Make it white instead on RGB and gray. */
+    memset(dp, '\0', d_remaining);
+  }
+  if (dp) inflateEnd(&zs);
+  if (ferror(f)) die("error reading png");
   fclose(f);
 }
 
@@ -438,7 +645,7 @@ int main(int argc, char **argv) {
   Image img;
   const uint8_t predictor_mode = PM_PNGAUTO;
   const xbool_t is_extended = 0;
-  const uint8_t zip_level = 0;
+  const uint8_t flate_level = 0;
 
   alloc_image(&img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1);
   memcpy(img.palette, palette, sizeof(palette) - 1);
@@ -457,7 +664,14 @@ int main(int argc, char **argv) {
     }
   }
   write_pnm("chess2.pgm", &img);
-  write_png("chess2.png", &img, is_extended, predictor_mode, zip_level);
+  write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
+  write_png("chess2n.png", &img, 1, PM_NONE, 9);
+  read_png("chess2n.png", &img);
+  write_png("chess2nr.png", &img, is_extended, PM_NONE, 9);
+  read_png("chess2.png", &img);
+  write_png("chess3.png", &img, is_extended, PM_PNGNONE, 9);
+  read_png("beach.png", &img);
+  write_png("beach3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
 
   return 0;
