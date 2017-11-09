@@ -216,6 +216,11 @@ static __inline unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
        : c;
 }
 
+static void* xzalloc(void *opaque, uInt items, uInt size) {
+  (void)opaque;
+  return calloc(items, size);
+}
+
 /* Returns the payload size of the IDAT chunk.
  * flate_level: 0 is uncompressed, 1..9 is compressed, 9 is maximum compression
  *   (slow, but produces slow output).
@@ -231,7 +236,7 @@ static uint32_t write_png_img_data(
   uInt zoutsize;
   /* If more than 24 bits, then rowsum would overflow. */
   if (rlen >> 24) die("image rlen too large");
-  zs.zalloc = Z_NULL;  /* void (*)(voidpf opaque, uInt items, uInt size) */
+  zs.zalloc = xzalloc;  /* calloc to pacify valgrind. */
   zs.zfree = Z_NULL;
   zs.opaque = Z_NULL;
   /* !! Preallocate buffers in 1 big chunk, see deflateInit in sam2p. Everywhere. */
@@ -527,7 +532,7 @@ static void read_png(const char *filename, Image *img) {
           memcpy(img->palette, buf, palette_size);
         } else if (is_idat) {
           if (!dp) {
-            zs.zalloc = Z_NULL;
+            zs.zalloc = xzalloc;  /* calloc to pacify valgrind. */
             zs.zfree = Z_NULL;
             zs.opaque = Z_NULL;
             if (inflateInit(&zs)) die("error in deflateInit");
