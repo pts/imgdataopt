@@ -1,8 +1,11 @@
 /* by pts@fazekas.hu at Mon Nov  6 18:50:40 CET 2017 */
-/* xstatic gcc -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -lz */
+/* Compilation:
+ * * xstatic gcc -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -lz
+ * Also works with g++ -ansi -pedantic ...
+ */
 /* !! compile the final version with g++ */
 /* !! ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
-/* !! nonvalidating PNG parser: ignore checksums, including zlib adler32 */
+/* !! nonvalidating PNG parser: properly ignore checksums */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -113,7 +116,7 @@ static __inline__ void dealloc_image(Image *img) {
 
 /* --- PNM */
 
-/* !! Remove PNM functinality */
+/* !! Remove PNM functionality */
 
 /* We relax: we don't check img->color_type == GRAY. */
 static void write_pnm(const char *filename, const Image *img) {
@@ -296,13 +299,9 @@ static uint32_t write_png_img_data(
         }
       }
 
-      /* !! Check that predictor selection and output is same as
-       *    sam2p PNGPredictorAuto.
-       * !! Check RGB4 against Ghostscript, Evince etc.
-       */
       --best_predicted;
       best_predicted[0] = (best_predicted - tmp) / rlen;
-      /* fprintf(stderr, "best_predictor=%ld\n", (long)((best_predicted - tmp) / rlen)); */
+      /* fprintf(stderr, "best_predictor=%d min_weight=%d\n", *best_predicted, best_rowsum); */
       zs.next_in = (Bytef*)best_predicted;
       zs.avail_in = rlen1;
       do {
@@ -639,30 +638,32 @@ static void read_png(const char *filename, Image *img) {
 
 /* --- */
 
-int main(int argc, char **argv) {
+static void init_image_chess(Image *img) {
+  enum { kWidth = 91, kHeight = 84 };  /* For -ansi -pedantic. */
   const uint32_t width = 91, height = 84;
   static const char palette[] = "\0\0\0\xff\xff\xff";
+  uint32_t x, y;
+  char (*img_data)[kHeight][kWidth];
+  alloc_image(img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1);
+  img_data = (char(*)[kHeight][kWidth])img->data;
+  memcpy(img->palette, palette, sizeof(palette) - 1);
+  for (y = 0; y < height; ++y) {
+    for (x = 0; x < width; ++x) {
+      (*img_data)[y][x] = (x == 1 || x == 82 || y == 1 || y == 82) ||
+                           (x >= 2 && x < 82 && y >= 2 && y < 82 &&
+                           ((x + 8) / 10 + (y + 8) / 10) % 2);
+    }
+  }
+}
+
+int main(int argc, char **argv) {
   Image img;
   const uint8_t predictor_mode = PM_PNGAUTO;
   const xbool_t is_extended = 0;
   const uint8_t flate_level = 0;
 
-  alloc_image(&img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1);
-  memcpy(img.palette, palette, sizeof(palette) - 1);
-
   (void)argc; (void)argv;
-
-  {  /* Fill the image */
-    uint32_t x, y;
-    char (*img_data)[height][width] = (char(*)[height][width])img.data;
-    for (y = 0; y < height; ++y) {
-      for (x = 0; x < width; ++x) {
-        (*img_data)[y][x] = (x == 1 || x == 82 || y == 1 || y == 82) ||
-                             (x >= 2 && x < 82 && y >= 2 && y < 82 &&
-                             ((x + 8) / 10 + (y + 8) / 10) % 2);
-      }
-    }
-  }
+  init_image_chess(&img);
   write_pnm("chess2.pgm", &img);
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
