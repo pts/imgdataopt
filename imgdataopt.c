@@ -6,6 +6,7 @@
 /* !! compile the final version with g++ */
 /* !! ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
 /* !! nonvalidating PNG parser: properly ignore checksums */
+/* !! make gcc extensions optional */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -15,7 +16,7 @@
 
 typedef char xbool_t;
 
-static void die(const char *msg) {
+static void __attribute__((noreturn)) die(const char *msg) {
   fprintf(stderr, "fatal: %s\n", msg);
   exit(120);
 }
@@ -88,8 +89,7 @@ static void alloc_image(
     Image *img, uint32_t width, uint32_t height, uint8_t bpc,
     uint8_t color_type, uint32_t palette_size) {
   const uint8_t cpp = (color_type == CT_RGB ? 3 : 1);
-  const uint32_t samples_per_row =
-      add0_check(color_type == CT_RGB ? multiply_check(width, 3) : width, 2);
+  const uint32_t samples_per_row = add0_check(multiply_check(width, cpp), 2);
   /* Number of bytes in a row. */
   const uint32_t rlen = bpc == 8 ? samples_per_row :
       bpc == 4 ? ((samples_per_row + 1) >> 1) :
@@ -454,6 +454,7 @@ static void write_png(const char *filename, const Image *img,
 static void read_png(const char *filename, Image *img) {
   uint32_t width, height, palette_size = 0;
   uint8_t bpc, color_type, filter;
+  char right_and_byte = 0;
   /* Must be large enough for the PNG header (33 bytes), for the palette (3
    * * 256 bytes), and must be fast enough for inflate, and must be at least
    * 4 bytes (adler32 checksum size) for inflate.
@@ -513,15 +514,21 @@ static void read_png(const char *filename, Image *img) {
           die("bad png palette size");
         }
         if (palette_size != 0) die("dupicate png palette");
-        img->palette_size = palette_size = chunk_size;
-        alloc_image(img, width, height, bpc, color_type, palette_size);
-        left_delta_inv = ((bpc * img->cpp + 7) >> 3);
+        palette_size = chunk_size;
+        goto do_alloc_image;
       }
       if (is_idat && !img->data) {
         /* PNG requires that PLTE is appears after IDAT. */
         if (color_type == CT_INDEXED_RGB) die("missing png palette");
-        alloc_image(img, width, height, bpc, color_type, 0);
-        left_delta_inv = ((bpc * img->cpp + 7) >> 3);
+        palette_size = 0;
+       do_alloc_image:
+        alloc_image(img, width, height, bpc, color_type, palette_size);
+        left_delta_inv = bpc * img->cpp;
+        /* 0: 0, 1: 0x80, 2: 0xc0, 3: 0xe0, 4: 0xf0, 5: 0xf8, 6: 0xfc, 7: 0xfe. */
+        right_and_byte = (uint16_t)0xff00 >>
+                         (((width & 7) * left_delta_inv) & 7);
+        /* fprintf(stderr, "!! width=%d rlen=%d right_and_byte=0x%x bpc=%d\n", width, rlen, (unsigned char)right_and_byte, bpc); */
+        left_delta_inv = ((left_delta_inv + 7) >> 3);
       }
       while (chunk_size > 0) {
         const uint32_t want = chunk_size < sizeof(buf) ?
@@ -573,6 +580,11 @@ static void read_png(const char *filename, Image *img) {
               zs.next_out = (Bytef*)dp;
               zs.avail_out = rlen;
             } else if (filter != PNG_FILTER_DEFAULT) {  /* PM_NONE */
+              uint32_t y = height;
+              for (; y > 0; --y) {
+                dp += rlen;
+                dp[-1] &= right_and_byte;
+              }
               d_remaining = 0;
             } else {
               /* Now we've predictor and dp[:rlen] as the current row ready. */
@@ -643,6 +655,80 @@ static void read_png(const char *filename, Image *img) {
 
 /* --- */
 
+/* Converts the image to bpc=to_bpc in place. Doesn't reallocate img->data
+ * (so some space will be wasted there).
+ */
+static void convert_to_bpc(Image *img, uint8_t to_bpc) {
+  /* alloc_image guarantees that there is no overflow here. */
+  const uint32_t spr = img->width * img->cpp;
+  const uint8_t bpc = img->bpc;
+  uint32_t height = img->height;
+  char *op = img->data;
+  const char *p = op, *pend;
+  register unsigned char v;
+  if (bpc == to_bpc) return;
+  if (bpc != 8 || img->color_type != CT_INDEXED_RGB) {  /* !! Support all color_type values. */
+    die("ASSERT: bad input for to_bpc_1");
+  }
+  if (to_bpc == 1) {
+    for (; height > 0; --height) {
+      for (pend = p + (spr & ~(uint32_t)7); p != pend; ) {
+        v = *p++ & 1;
+        v <<= 1; v |= *p++ & 1;
+        v <<= 1; v |= *p++ & 1;
+        v <<= 1; v |= *p++ & 1;
+        v <<= 1; v |= *p++ & 1;
+        v <<= 1; v |= *p++ & 1;
+        v <<= 1; v |= *p++ & 1;
+        *op++ = (v << 1) | (*p++ & 1);
+      }
+      pend = p + (spr & 7);
+      if (p != pend) {
+        v = *p++ & 1;
+        while (p != pend) {
+          v <<= 1; v |= *p++ & 1;
+        }
+        *op++ = v << (8 - (spr & 7));
+      }
+    }
+    img->rlen = (spr + 7) >> 3;
+  } else if (to_bpc == 2) {
+    for (; height > 0; --height) {
+      for (pend = p + (spr & ~(uint32_t)3); p != pend;) {
+        v = *p++ & 3;
+        v <<= 2; v |= *p++ & 3;
+        v <<= 2; v |= *p++ & 3;
+        *op++ = (v << 2) | (*p++ & 3);
+      }
+      pend = p + (spr & 3);
+      if (p != pend) {
+        v = *p++ & 3;
+        while (p != pend) {
+          v <<= 2; v |= *p++ & 3;
+        }
+        *op++ = v << (8 - 2 * (spr & 3));
+      }
+    }
+    img->rlen = (spr + 3) >> 2;
+  } else if (to_bpc == 4) {
+    for (; height > 0; --height) {
+      for (pend = p + (spr & ~(uint32_t)1); p != pend;) {
+        v = *p++ & 15;
+        *op++ = (v << 4) | (*p++ & 15);
+      }
+      if ((spr & 1) != 0) {
+        *op++ = (*p++ & 15) << 4;
+      }
+    }
+    img->rlen = (spr + 1) >> 1;
+  } else {
+    die("ASSERT: bad to_bpc");
+  }
+  img->bpc = to_bpc;
+}
+
+/* --- */
+
 static void init_image_chess(Image *img) {
   enum { kWidth = 91, kHeight = 84 };  /* For -ansi -pedantic. */
   const uint32_t width = 91, height = 84;
@@ -672,6 +758,10 @@ int main(int argc, char **argv) {
   write_pnm("chess2.pgm", &img);
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
+  convert_to_bpc(&img, 1);
+  write_png("chess2b1.png", &img, is_extended, PM_NONE, 9);
+  read_png("chess2b1.png", &img);
+  write_png("chess2b1w.png", &img, 1, predictor_mode, 9);
   read_png("chess2n.png", &img);
   write_png("chess2nr.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2.png", &img);
