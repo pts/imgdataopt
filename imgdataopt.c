@@ -1,5 +1,8 @@
-/* by pts@fazekas.hu at Mon Nov  6 18:50:40 CET 2017 */
-/* Compilation:
+/*
+ * imgdataopt: raster (bitmap) image data size optimizer
+ * by pts@fazekas.hu at Mon Nov  6 18:50:40 CET 2017
+ *
+ * Compilation:
  * * xstatic gcc -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -lz
  * Also works with g++ -ansi -pedantic ...
  * Also works with gcc-4.4 -ansi -pedantic ...
@@ -9,23 +12,29 @@
  * Also works with gcc-4.8 -ansi -pedantic ...
  * Also works with g++-4.8 -ansi -pedantic ...
  * Also works with clang-3.4 -ansi -pedantic ...
+ * Also works with tcc 0.9.25 (and pts-tcc 0.9.25): tcc -c -O2 -W -Wall -Wextra -Werror imgdataopt.c && gcc -m32 -o imgdataopt imgdataopt.o -lz
  */
+
 /* !! compile the final version with g++ */
 /* !! check: ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
 /* !! check: nonvalidating PNG parser: properly ignore checksums */
 
+#ifdef __TINYC__   /* tcc: https://bellard.org/tcc/ */
+#define USE_GCC_ALTERNATE_KEYWORDS 1
+#else
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>  /* crc32(), adler32(), deflateInit(), deflate(), deflateEnd(), inflateInit(), inflate(), inflateEnd(). */
+#endif
 
 /* Disable some GCC alternate keywords
  * (https://gcc.gnu.org/onlinedocs/gcc/Alternate-Keywords.html) if not
  * compiling with GCC (or Clang). `gcc -ansi -pedantic' has no effect on
  * these.
  */
-#ifdef __GNUC__
+#if defined(__GNUC__) || defined(USE_GCC_ALTERNATE_KEYWORDS)
 #define ATTRIBUTE_NORETURN __attribute__((noreturn))
 #define ATTRIBUTE_USED __attribute__((used))
 #define INLINE __inline__
@@ -33,6 +42,77 @@
 #define ATTRIBUTE_NORETURN
 #define ATTRIBUTE_USED
 #define INLINE
+#endif
+
+#ifdef __TINYC__
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long long uint32_t;
+typedef char int8_t;
+typedef short int16_t;
+typedef int int32_t;
+typedef long long int32_t;
+typedef unsigned int size_t;  /* TODO(pts): 64-bit tcc. */
+#define NULL ((void*)0)
+void ATTRIBUTE_NORETURN exit(int status);
+/* string.h */
+void *memset(void *s, int c, size_t n);
+void *memcpy(void *dest, const void *src, size_t n);
+void *memmove(void *dest, const void *src, size_t n);
+int memcmp(const void *s1, const void *s2, size_t n);
+/* stdio.h */
+#define SEEK_SET 0
+typedef struct FILE FILE;
+extern FILE *stderr;
+void *malloc(size_t size);
+void free(void *ptr);
+void *calloc(size_t nmemb, size_t size);
+void *realloc(void *ptr, size_t size);
+FILE *fopen(const char *path, const char *mode);
+int fprintf(FILE *stream, const char *format, ...);
+int putc(int c, FILE *stream);
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
+int fseek(FILE *stream, long offset, int whence);
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
+int fflush(FILE *stream);
+int ferror(FILE *stream);
+int fclose(FILE *stream);
+/* zlib.h */
+#define Z_NO_FLUSH 0
+#define Z_FINISH 4
+#define Z_OK 0
+#define Z_STREAM_END 1
+#define Z_DATA_ERROR (-3)
+typedef unsigned int uInt;
+typedef unsigned long uLong;
+typedef unsigned char Bytef;
+typedef struct z_stream_s {
+  const Bytef *next_in;
+  uInt     avail_in;
+  uLong    total_in;
+  Bytef    *next_out;
+  uInt     avail_out;
+  uLong    total_out;
+  const char *msg;
+  struct internal_state *state;
+  void*/*alloc_func*/ zalloc;
+  void*/*free_func*/  zfree;
+  void    *opaque;
+  int     data_type;
+  uLong   adler;
+  uLong   reserved;
+} z_stream;
+#define ZLIB_VERSION "1.0"  /* Doesn't matter, "1.2.8" also works. */
+int deflateInit_(z_stream *strm, int level, const char *version, int stream_size);
+#define deflateInit(strm, level) deflateInit_((strm), (level), ZLIB_VERSION, (int)sizeof(z_stream))
+int deflate(z_stream *strm, int flush);
+int deflateEnd(z_stream *strm);
+int inflateInit_(z_stream *strm, const char *version, int stream_size);
+#define inflateInit(strm) inflateInit_((strm), ZLIB_VERSION, (int)sizeof(z_stream))
+int inflate(z_stream *strm, int flush);
+int inflateEnd(z_stream *strm);
+uLong crc32(uLong crc, const Bytef *buf, uInt len);
 #endif
 
 typedef char xbool_t;
@@ -264,8 +344,8 @@ static uint32_t write_png_img_data(
   /* If more than 24 bits, then rowsum would overflow. */
   if (rlen >> 24) die("image rlen too large");
   zs.zalloc = xzalloc;  /* calloc to pacify valgrind. */
-  zs.zfree = Z_NULL;
-  zs.opaque = Z_NULL;
+  zs.zfree = NULL;
+  zs.opaque = NULL;
   /* !! Preallocate buffers in 1 big chunk, see deflateInit in sam2p. Everywhere. */
   if (deflateInit(&zs, flate_level)) die("error in deflateInit");
   fwrite("\0\0\0\0IDAT", 1, 8, f);
@@ -568,8 +648,8 @@ static void read_png(const char *filename, Image *img) {
         } else if (is_idat) {
           if (!dp) {
             zs.zalloc = xzalloc;  /* calloc to pacify valgrind. */
-            zs.zfree = Z_NULL;
-            zs.opaque = Z_NULL;
+            zs.zfree = NULL;
+            zs.opaque = NULL;
             if (inflateInit(&zs)) die("error in deflateInit");
             dp = dp0 = (unsigned char*)img->data;
             /* Overflow already checked by alloc_image. */
