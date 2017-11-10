@@ -764,6 +764,26 @@ static void read_png(const char *filename, Image *img) {
 
 /* --- */
 
+static xbool_t is_gray_ok(const Image *img) {
+  const char *p, *pend;
+  if (img->bpc != 8) die("ASSERT: is_gray_ok needs bpc=8");
+  if (img->color_type == CT_GRAY) {
+    return 1;
+  } else if (img->color_type == CT_INDEXED_RGB) {
+    p = img->palette;
+    pend = p + img->palette_size;
+  } else {
+    p = img->data;
+    pend = img->data + img->rlen * img->height;
+  }
+  /* assert((p - pend) % 3 == 0); */
+  for (; p != pend; p += 2) {
+    const char v = *p++;
+    if (v != p[0] || v != p[1]) return 0;
+  }
+  return 1;
+}
+
 /* Converts the image to bpc=to_bpc in place.
  *
  * Assumes (but doesn't check) that the conversion is lossless.
@@ -1033,6 +1053,7 @@ int main(int argc, char **argv) {
 
   (void)argc; (void)argv;
   init_image_chess(&img);
+  fprintf(stderr, "is_gray_ok=%d\n", is_gray_ok(&img));  /* : 1 */
   write_pnm("chess2.pgm", &img);
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
@@ -1050,6 +1071,7 @@ int main(int argc, char **argv) {
   convert_to_bpc(&img, 4);
   write_png("chess2g4.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 8);
+  fprintf(stderr, "is_gray_ok=%d\n", is_gray_ok(&img));  /* : 1 */
   write_png("chess2g8.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i1.png", &img);
   write_png("chess2i1w.png", &img, 1, predictor_mode, 9);
