@@ -2,22 +2,43 @@
 /* Compilation:
  * * xstatic gcc -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -lz
  * Also works with g++ -ansi -pedantic ...
+ * Also works with gcc-4.4 -ansi -pedantic ...
+ * Also works with g++-4.4 -ansi -pedantic ...
+ * Also works with gcc-4.6 -ansi -pedantic ...
+ * Also works with g++-4.6 -ansi -pedantic ...
+ * Also works with gcc-4.8 -ansi -pedantic ...
+ * Also works with g++-4.8 -ansi -pedantic ...
+ * Also works with clang-3.4 -ansi -pedantic ...
  */
 /* !! compile the final version with g++ */
-/* !! ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
-/* !! nonvalidating PNG parser: properly ignore checksums */
-/* !! make gcc extensions optional */
+/* !! check: ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
+/* !! check: nonvalidating PNG parser: properly ignore checksums */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <zlib.h>  /* crc32(), adler32(), deflateInit(), deflate(), deflateEnd(). */
+#include <zlib.h>  /* crc32(), adler32(), deflateInit(), deflate(), deflateEnd(), inflateInit(), inflate(), inflateEnd(). */
+
+/* Disable some GCC alternate keywords
+ * (https://gcc.gnu.org/onlinedocs/gcc/Alternate-Keywords.html) if not
+ * compiling with GCC (or Clang). `gcc -ansi -pedantic' has no effect on
+ * these.
+ */
+#ifdef __GNUC__
+#define ATTRIBUTE_NORETURN __attribute__((noreturn))
+#define ATTRIBUTE_USED __attribute__((used))
+#define INLINE __inline__
+#else
+#define ATTRIBUTE_NORETURN
+#define ATTRIBUTE_USED
+#define INLINE
+#endif
 
 typedef char xbool_t;
 
-static void __attribute__((noreturn)) die(const char *msg) {
-  fprintf(stderr, "fatal: %s\n", msg);
+static ATTRIBUTE_NORETURN void die(const char *msg) {
+  fprintf(stderr, "fatal: %s\n", msg);  /* !! get rid of printf */
   exit(120);
 }
 
@@ -84,7 +105,7 @@ typedef struct Image {
   uint8_t cpp;
 } Image;
 
-static void noalloc_image(Image *img) __attribute__((used));  /* !! */
+static void noalloc_image(Image *img) ATTRIBUTE_USED;  /* !! */
 static void noalloc_image(Image *img) {
   img->data = img->palette = NULL;
 }
@@ -115,7 +136,7 @@ static void alloc_image(
   img->palette = (char*)xmalloc(palette_size);
 }
 
-static __inline__ void dealloc_image(Image *img) {
+static INLINE void dealloc_image(Image *img) {
   free(img->data); img->data = NULL;
   free(img->palette); img->palette = NULL;
 }
@@ -200,11 +221,11 @@ char *put_u16le(char *p, uint16_t k) {
 }
 
 /* Using i * -1 instead of -i because egcs-2.91.60 is buggy. */
-static __inline__ unsigned absu(unsigned i) {
+static INLINE unsigned absu(unsigned i) {
   return ((signed)i)<0 ? (i * -1) : i;
 }
 
-static __inline unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
+static INLINE unsigned paeth_predictor(unsigned a, unsigned b, unsigned c) {
   /* Code ripped from RFC 2083 (PNG specification), which also says:
    * The calculations within the PaethPredictor function must be
    * performed exactly, without overflow.  Arithmetic modulo 256 is to
