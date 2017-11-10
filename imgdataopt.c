@@ -415,8 +415,9 @@ static void write_png(const char *filename, const Image *img,
   const uint8_t bpc = img->bpc;
   const uint8_t color_type = img->color_type;
   uint8_t filter;
-  const uint32_t idat_size_ofs = img->palette_size == 0 ?
-      33 : add_check(45, img->palette_size);
+  xbool_t do_palette = color_type == CT_INDEXED_RGB;
+  const uint32_t idat_size_ofs = do_palette ?
+      add_check(45, img->palette_size) : 33;
   uint32_t idat_size;
   FILE *f;
   char buf[4];
@@ -441,7 +442,7 @@ static void write_png(const char *filename, const Image *img,
 
   if (!(f = fopen(filename, "wb"))) die("error writing png");
   write_png_header(f, img->width, img->height, bpc, color_type, filter);
-  if (img->palette_size > 0) {
+  if (do_palette) {
     write_png_palette(f, img->palette, img->palette_size);
   }
   idat_size = write_png_img_data(
@@ -675,9 +676,6 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
   const char *p = op, *pend;
   register unsigned char v;
   if (bpc == to_bpc) return;
-  if (img->color_type != CT_INDEXED_RGB) {  /* !! Support all color_type values. */
-    die("ASSERT: color_type not supported for convert_to_bpc");
-  }
   if (bpc != 8 || to_bpc == 8) {  /* Convert to bpc=8 first. */
     const uint32_t rlen = img->rlen;
     const uint32_t new_size = multiply_check(spr, height);
@@ -690,46 +688,99 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
     }
     p += new_size - rlen_height;
     memmove((char*)p, op, rlen_height);
-    if (bpc == 4) {
-      for (; h1 > 0; --h1) {
-        uint8_t i = spr & 1;
-        for (pend = p + (rlen - (i != 0)); p != pend;) {
-          v = *p++;
-          *op++ = v >> 4;
-          *op++ = v & 15;
+    if (img->color_type == CT_INDEXED_RGB) {
+      if (bpc == 4) {
+        for (; h1 > 0; --h1) {
+          uint8_t i = spr & 1;
+          for (pend = p + (rlen - (i != 0)); p != pend;) {
+            v = *p++;
+            *op++ = v >> 4;
+            *op++ = v & 15;
+          }
+          if (i != 0) *op++ = *p++ >> 4;
         }
-        if (i != 0) *op++ = *p++ >> 4;
+      } else if (bpc == 2) {
+        for (; h1 > 0; --h1) {
+          uint8_t i = spr & 3;
+          for (pend = p + (rlen - (i != 0)); p != pend;) {
+            v = *p++;
+            *op++ = v >> 6;
+            *op++ = (v >> 4) & 3;
+            *op++ = (v >> 2) & 3;
+            *op++ = v & 3;
+          }
+          if (i != 0) {
+            for (v = *p++; i > 0; *op++ = v >> 6, v <<= 2, --i) {}
+          }
+        }
+      } else if (bpc == 1) {
+        for (; h1 > 0; --h1) {
+          uint8_t i = spr & 7;
+          for (pend = p + (rlen - (i != 0)); p != pend;) {
+            v = *p++;
+            *op++ = v >> 7;
+            *op++ = (v >> 6) & 1;
+            *op++ = (v >> 5) & 1;
+            *op++ = (v >> 4) & 1;
+            *op++ = (v >> 3) & 1;
+            *op++ = (v >> 2) & 1;
+            *op++ = (v >> 1) & 1;
+            *op++ = v & 1;
+          }
+          if (i != 0) {
+            for (v = *p++; i > 0; *op++ = v >> 7, v <<= 1, --i) {}
+          }
+        }
       }
-    } else if (bpc == 2) {
-      for (; h1 > 0; --h1) {
-        uint8_t i = spr & 3;
-        for (pend = p + (rlen - (i != 0)); p != pend;) {
-          v = *p++;
-          *op++ = v >> 6;
-          *op++ = (v >> 4) & 3;
-          *op++ = (v >> 2) & 3;
-          *op++ = v & 3;
+    } else {  /* Non-indexed. */
+      if (bpc == 4) {
+        for (; h1 > 0; --h1) {
+          uint8_t i = spr & 1;
+          unsigned char w;
+          for (pend = p + (rlen - (i != 0)); p != pend;) {
+            v = *p++;
+            /* (w * 0x11) is optimized by gcc -O2 to (w | w << 4), but not by
+             * gcc -Om.
+             */
+            w = (v >> 4); *op++ = w | (w << 4);
+            w = (v & 15); *op++ = w | (w << 4);
+          }
+          if (i != 0) {
+            w = (*p++ >> 4); *op++ = w | (w << 4);
+          }
         }
-        if (i != 0) {
-          for (v = *p++; i > 0; *op++ = v >> 6, v <<= 2, --i) {}
+      } else if (bpc == 2) {
+        for (; h1 > 0; --h1) {
+          uint8_t i = spr & 3;
+          unsigned char w;
+          for (pend = p + (rlen - (i != 0)); p != pend;) {
+            v = *p++;
+            w = v >> 6; w |= (w << 2); *op++ = w | (w << 4);
+            w = (v >> 4) & 3; w |= (w << 2); *op++ = w | (w << 4);
+            w = (v >> 2) & 3; w |= (w << 2); *op++ = w | (w << 4);
+            w = v & 3; w |= (w << 2); *op++ = w | (w << 4);
+          }
+          if (i != 0) {
+            for (v = *p++; i > 0; w = v >> 6, w |= (w << 2), *op++ = w | (w << 4), v <<= 2, --i) {}
+          }
         }
-      }
-    } else if (bpc == 1) {
-      for (; h1 > 0; --h1) {
-        uint8_t i = spr & 7;
-        for (pend = p + (rlen - (i != 0)); p != pend;) {
-          v = *p++;
-          *op++ = v >> 7;
-          *op++ = (v >> 6) & 1;
-          *op++ = (v >> 5) & 1;
-          *op++ = (v >> 4) & 1;
-          *op++ = (v >> 3) & 1;
-          *op++ = (v >> 2) & 1;
-          *op++ = (v >> 1) & 1;
-          *op++ = v & 1;
-        }
-        if (i != 0) {
-          for (v = *p++; i > 0; *op++ = v >> 7, v <<= 1, --i) {}
+      } else if (bpc == 1) {
+        for (; h1 > 0; --h1) {
+          uint8_t i = spr & 7;
+          for (pend = p + (rlen - (i != 0)); p != pend;) {
+            v = *p++;
+            *op++ = -(v >> 7);
+            *op++ = -((v >> 6) & 1);
+            *op++ = -((v >> 5) & 1);
+            *op++ = -((v >> 4) & 1);
+            *op++ = -((v >> 3) & 1);
+            *op++ = -((v >> 2) & 1);
+            *op++ = -((v >> 1) & 1);
+            *op++ = -(v & 1);
+          }
+          if (i != 0) {
+            for (v = *p++; i > 0; *op++ = -(v >> 7), v <<= 1, --i) {}
+          }
         }
       }
     }
@@ -737,60 +788,118 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
     img->rlen = spr;
     p = op = img->data;
   }
-  if (to_bpc == 1) {
-    for (; height > 0; --height) {
-      for (pend = p + (spr & ~(uint32_t)7); p != pend;) {
-        v = *p++ & 1;
-        v <<= 1; v |= *p++ & 1;
-        v <<= 1; v |= *p++ & 1;
-        v <<= 1; v |= *p++ & 1;
-        v <<= 1; v |= *p++ & 1;
-        v <<= 1; v |= *p++ & 1;
-        v <<= 1; v |= *p++ & 1;
-        *op++ = (v << 1) | (*p++ & 1);
-      }
-      pend = p + (spr & 7);
-      if (p != pend) {
-        v = *p++ & 1;
-        while (p != pend) {
+  if (img->color_type == CT_INDEXED_RGB) {
+    if (to_bpc == 1) {
+      for (; height > 0; --height) {
+        for (pend = p + (spr & ~(uint32_t)7); p != pend;) {
+          v = *p++ & 1;
           v <<= 1; v |= *p++ & 1;
+          v <<= 1; v |= *p++ & 1;
+          v <<= 1; v |= *p++ & 1;
+          v <<= 1; v |= *p++ & 1;
+          v <<= 1; v |= *p++ & 1;
+          v <<= 1; v |= *p++ & 1;
+          *op++ = (v << 1) | (*p++ & 1);
         }
-        *op++ = v << (8 - (spr & 7));
+        pend = p + (spr & 7);
+        if (p != pend) {
+          v = *p++ & 1;
+          while (p != pend) {
+            v <<= 1; v |= *p++ & 1;
+          }
+          *op++ = v << (8 - (spr & 7));
+        }
       }
-    }
-    img->rlen = (spr + 7) >> 3;
-  } else if (to_bpc == 2) {
-    for (; height > 0; --height) {
-      for (pend = p + (spr & ~(uint32_t)3); p != pend;) {
-        v = *p++ & 3;
-        v <<= 2; v |= *p++ & 3;
-        v <<= 2; v |= *p++ & 3;
-        *op++ = (v << 2) | (*p++ & 3);
-      }
-      pend = p + (spr & 3);
-      if (p != pend) {
-        v = *p++ & 3;
-        while (p != pend) {
+      img->rlen = (spr + 7) >> 3;
+    } else if (to_bpc == 2) {
+      for (; height > 0; --height) {
+        for (pend = p + (spr & ~(uint32_t)3); p != pend;) {
+          v = *p++ & 3;
           v <<= 2; v |= *p++ & 3;
+          v <<= 2; v |= *p++ & 3;
+          *op++ = (v << 2) | (*p++ & 3);
         }
-        *op++ = v << (8 - 2 * (spr & 3));
+        pend = p + (spr & 3);
+        if (p != pend) {
+          v = *p++ & 3;
+          while (p != pend) {
+            v <<= 2; v |= *p++ & 3;
+          }
+          *op++ = v << (8 - 2 * (spr & 3));
+        }
       }
+      img->rlen = (spr + 3) >> 2;
+    } else if (to_bpc == 4) {
+      for (; height > 0; --height) {
+        for (pend = p + (spr & ~(uint32_t)1); p != pend;) {
+          v = *p++ & 15;
+          *op++ = (v << 4) | (*p++ & 15);
+        }
+        if ((spr & 1) != 0) {
+          *op++ = (*p++ & 15) << 4;
+        }
+      }
+      img->rlen = (spr + 1) >> 1;
+    } else if (to_bpc == 8) {
+    } else {
+      die("ASSERT: bad to_bpc");
     }
-    img->rlen = (spr + 3) >> 2;
-  } else if (to_bpc == 4) {
-    for (; height > 0; --height) {
-      for (pend = p + (spr & ~(uint32_t)1); p != pend;) {
-        v = *p++ & 15;
-        *op++ = (v << 4) | (*p++ & 15);
+  } else {  /* Non-indexed. */
+    if (to_bpc == 1) {
+      for (; height > 0; --height) {
+        for (pend = p + (spr & ~(uint32_t)7); p != pend;) {
+          v = *(unsigned char*)p++ >> 7;
+          v <<= 1; v |= *(unsigned char*)p++ >> 7;
+          v <<= 1; v |= *(unsigned char*)p++ >> 7;
+          v <<= 1; v |= *(unsigned char*)p++ >> 7;
+          v <<= 1; v |= *(unsigned char*)p++ >> 7;
+          v <<= 1; v |= *(unsigned char*)p++ >> 7;
+          v <<= 1; v |= *(unsigned char*)p++ >> 7;
+          *op++ = (v << 1) | (*(unsigned char*)p++ >> 7);
+        }
+        pend = p + (spr & 7);
+        if (p != pend) {
+          v = *(unsigned char*)p++ >> 7;
+          while (p != pend) {
+            v <<= 1; v |= *(unsigned char*)p++ >> 7;
+          }
+          *op++ = v << (8 - (spr & 7));
+        }
       }
-      if ((spr & 1) != 0) {
-        *op++ = (*p++ & 15) << 4;
+      img->rlen = (spr + 7) >> 3;
+    } else if (to_bpc == 2) {
+      for (; height > 0; --height) {
+        for (pend = p + (spr & ~(uint32_t)3); p != pend;) {
+          v = *(unsigned char*)p++ >> 6;
+          v <<= 2; v |= *(unsigned char*)p++ >> 6;
+          v <<= 2; v |= *(unsigned char*)p++ >> 6;
+          *op++ = (v << 2) | (*(unsigned char*)p++ >> 6);
+        }
+        pend = p + (spr & 3);
+        if (p != pend) {
+          v = *(unsigned char*)p++ >> 6;
+          while (p != pend) {
+            v <<= 2; v |= *(unsigned char*)p++ >> 6;
+          }
+          *op++ = v << (8 - 2 * (spr & 3));
+        }
       }
+      img->rlen = (spr + 3) >> 2;
+    } else if (to_bpc == 4) {
+      for (; height > 0; --height) {
+        for (pend = p + (spr & ~(uint32_t)1); p != pend;) {
+          v = *(unsigned char*)p++ & 0xf0;
+          *op++ = v | (*(unsigned char*)p++ >> 4);
+        }
+        if ((spr & 1) != 0) {
+          *op++ = *(unsigned char*)p++ & 0xf0;
+        }
+      }
+      img->rlen = (spr + 1) >> 1;
+    } else if (to_bpc == 8) {
+    } else {
+      die("ASSERT: bad to_bpc");
     }
-    img->rlen = (spr + 1) >> 1;
-  } else if (to_bpc == 8) {
-  } else {
-    die("ASSERT: bad to_bpc");
   }
   img->bpc = to_bpc;
 }
@@ -827,13 +936,22 @@ int main(int argc, char **argv) {
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
   convert_to_bpc(&img, 1);
-  write_png("chess2b1.png", &img, is_extended, PM_NONE, 9);
+  write_png("chess2i1.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 2);
-  write_png("chess2b2.png", &img, is_extended, PM_NONE, 9);
+  write_png("chess2i2.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 4);
-  write_png("chess2b4.png", &img, is_extended, PM_NONE, 9);
-  read_png("chess2b1.png", &img);
-  write_png("chess2b1w.png", &img, 1, predictor_mode, 9);
+  write_png("chess2i4.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 1);
+  img.color_type = CT_GRAY;  /* This only works if bpc=1. */
+  write_png("chess2g1.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 2);
+  write_png("chess2g2.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 4);
+  write_png("chess2g4.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 8);
+  write_png("chess2g8.png", &img, is_extended, PM_NONE, 9);
+  read_png("chess2i1.png", &img);
+  write_png("chess2i1w.png", &img, 1, predictor_mode, 9);
   read_png("chess2n.png", &img);
   write_png("chess2nr.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2.png", &img);
