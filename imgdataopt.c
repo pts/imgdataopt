@@ -64,7 +64,11 @@ typedef struct Image {
    * It's guaranteed that rlen * height first to an uint32_t.
    */
   uint32_t rlen;
-  /* p[:rlen * height] contains image data. */
+  /* data[:alloced] is available as a buffer.
+   * alloced >= rlen * height.
+   */
+  uint32_t alloced;
+  /* data[:rlen * height] contains image data. */
   char *data;
   /* At most 3 * 256 bytes, RGB... format. */
   char *palette;
@@ -95,17 +99,19 @@ static void alloc_image(
       bpc == 4 ? ((samples_per_row + 1) >> 1) :
       bpc == 2 ? ((samples_per_row + 3) >> 2) :
       bpc == 1 ? ((samples_per_row + 7) >> 3) : 0;
+  const uint32_t alloced = multiply_check(rlen, height);
   add_check(multiply_check(rlen, 7), 1);  /* Early upper limit. */
   img->width = width;
   img->height = height;
   img->rlen = rlen;
+  img->alloced = alloced;
   img->bpc = bpc;
   img->color_type = color_type;
   img->cpp = cpp;
   if (palette_size == 0 && color_type == CT_INDEXED_RGB) palette_size = 3 * 256;
   if (palette_size != 0 && color_type != CT_INDEXED_RGB) palette_size = 0;
   img->palette_size = palette_size;
-  img->data = (char*)xmalloc(multiply_check(rlen, height));
+  img->data = (char*)xmalloc(alloced);
   img->palette = (char*)xmalloc(palette_size);
 }
 
@@ -656,8 +662,9 @@ static void read_png(const char *filename, Image *img) {
 
 /* --- */
 
-/* Converts the image to bpc=to_bpc in place. Doesn't reallocate img->data
- * (so some space will be wasted there).
+/* Converts the image to bpc=to_bpc in place.
+ *
+ * Assumes (but doesn't check) that the conversion is lossless.
  */
 static void convert_to_bpc(Image *img, uint8_t to_bpc) {
   /* alloc_image guarantees that there is no overflow here. */
@@ -668,12 +675,71 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
   const char *p = op, *pend;
   register unsigned char v;
   if (bpc == to_bpc) return;
-  if (bpc != 8 || img->color_type != CT_INDEXED_RGB) {  /* !! Support all color_type values. */
-    die("ASSERT: bad input for to_bpc_1");
+  if (img->color_type != CT_INDEXED_RGB) {  /* !! Support all color_type values. */
+    die("ASSERT: color_type not supported for convert_to_bpc");
+  }
+  if (bpc != 8 || to_bpc == 8) {  /* Convert to bpc=8 first. */
+    const uint32_t rlen = img->rlen;
+    const uint32_t new_size = multiply_check(spr, height);
+    const uint32_t rlen_height = rlen * height;
+    uint32_t h1 = height;
+    if (img->alloced < new_size) {
+      p = img->data = op = (char*)realloc(op, new_size);
+      if (!op) die("out of memory");
+      img->alloced = new_size;
+    }
+    p += new_size - rlen_height;
+    memmove((char*)p, op, rlen_height);
+    if (bpc == 4) {
+      for (; h1 > 0; --h1) {
+        uint8_t i = spr & 1;
+        for (pend = p + (rlen - (i != 0)); p != pend;) {
+          v = *p++;
+          *op++ = v >> 4;
+          *op++ = v & 15;
+        }
+        if (i != 0) *op++ = *p++ >> 4;
+      }
+    } else if (bpc == 2) {
+      for (; h1 > 0; --h1) {
+        uint8_t i = spr & 3;
+        for (pend = p + (rlen - (i != 0)); p != pend;) {
+          v = *p++;
+          *op++ = v >> 6;
+          *op++ = (v >> 4) & 3;
+          *op++ = (v >> 2) & 3;
+          *op++ = v & 3;
+        }
+        if (i != 0) {
+          for (v = *p++; i > 0; *op++ = v >> 6, v <<= 2, --i) {}
+        }
+      }
+    } else if (bpc == 1) {
+      for (; h1 > 0; --h1) {
+        uint8_t i = spr & 7;
+        for (pend = p + (rlen - (i != 0)); p != pend;) {
+          v = *p++;
+          *op++ = v >> 7;
+          *op++ = (v >> 6) & 1;
+          *op++ = (v >> 5) & 1;
+          *op++ = (v >> 4) & 1;
+          *op++ = (v >> 3) & 1;
+          *op++ = (v >> 2) & 1;
+          *op++ = (v >> 1) & 1;
+          *op++ = v & 1;
+        }
+        if (i != 0) {
+          for (v = *p++; i > 0; *op++ = v >> 7, v <<= 1, --i) {}
+        }
+      }
+    }
+    img->bpc = 8;
+    img->rlen = spr;
+    p = op = img->data;
   }
   if (to_bpc == 1) {
     for (; height > 0; --height) {
-      for (pend = p + (spr & ~(uint32_t)7); p != pend; ) {
+      for (pend = p + (spr & ~(uint32_t)7); p != pend;) {
         v = *p++ & 1;
         v <<= 1; v |= *p++ & 1;
         v <<= 1; v |= *p++ & 1;
@@ -722,6 +788,7 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
       }
     }
     img->rlen = (spr + 1) >> 1;
+  } else if (to_bpc == 8) {
   } else {
     die("ASSERT: bad to_bpc");
   }
@@ -761,6 +828,10 @@ int main(int argc, char **argv) {
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
   convert_to_bpc(&img, 1);
   write_png("chess2b1.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 2);
+  write_png("chess2b2.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 4);
+  write_png("chess2b4.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2b1.png", &img);
   write_png("chess2b1w.png", &img, 1, predictor_mode, 9);
   read_png("chess2n.png", &img);
