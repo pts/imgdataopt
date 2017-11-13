@@ -185,7 +185,7 @@ typedef struct Image {
   uint8_t cpp;
 } Image;
 
-static void noalloc_image(Image *img) ATTRIBUTE_USED;  /* !! */
+static void noalloc_image(Image *img) ATTRIBUTE_USED;  /* !! remove if unused */
 static void noalloc_image(Image *img) {
   img->data = img->palette = NULL;
 }
@@ -558,6 +558,50 @@ static void write_png(const char *filename, const Image *img,
   fclose(f);
 }
 
+static void check_palette(const Image *img) {
+  const uint32_t palette_size = img->palette_size;
+  const uint8_t max_color_idx = (palette_size / 3) - 1;
+  const uint8_t bpc = img->bpc;
+  if (img->color_type != CT_INDEXED_RGB) return;
+  if (palette_size == 0 || palette_size >= 3 * 256 ||
+      palette_size % 3 != 0) die("bad palette size");
+  if (!img->palette) die("missing palette");
+  if (max_color_idx < (1 << img->bpc) - 1) {
+    /* Now check that the image doesn't contain too high color indexes. */
+    const unsigned char *p = (const unsigned char*)img->data;
+    const unsigned char *pend = p + img->height * img->rlen;
+    /* fprintf(stderr, "mci=%d bpc=%d\n", max_color_idx, img->bpc); */
+    /* The loops below assume that unused bits at the end of each row are 0. */
+    if (bpc == 8) {
+      for (; p != pend; ++p) {
+        if (*p > max_color_idx) {
+         too_much:
+          die("image has color index too large");
+        }
+      }
+    } else if (bpc == 4) {
+      while (p != pend) {
+        const uint8_t v = *p++;
+        if ((v >> 4) > max_color_idx || (v & 15) > max_color_idx) goto too_much;
+      }
+    } else if (bpc == 2) {
+      while (p != pend) {
+        const uint8_t v = *p++;
+        if ((v >> 6) > max_color_idx || ((v >> 4) & 3) > max_color_idx ||
+            ((v >> 2) & 3) > max_color_idx || (v & 3) > max_color_idx
+           ) goto too_much;
+      }
+    } else if (bpc == 1) {
+      /* This assumes max_color_idx == 0, which is true, because of
+       * (max_color_idx < (1 << img->bpc) - 1) above.
+       */
+      for (; p != pend; ++p) {
+        if (*p != 0) goto too_much;
+      }
+    }
+  }
+}
+
 /* img must be initialized (at least noalloc_image). */
 static void read_png(const char *filename, Image *img) {
   uint32_t width, height, palette_size = 0;
@@ -621,6 +665,7 @@ static void read_png(const char *filename, Image *img) {
         if (chunk_size == 0 || chunk_size > 3 * 256 || chunk_size % 3 != 0) {
           die("bad png palette size");
         }
+        if (chunk_size > (3U << bpc)) die("png palette too long");
         if (palette_size != 0) die("dupicate png palette");
         palette_size = chunk_size;
         goto do_alloc_image;
@@ -635,7 +680,7 @@ static void read_png(const char *filename, Image *img) {
         /* 0: 0xff, 1: 0x80, 2: 0xc0, 3: 0xe0, 4: 0xf0, 5: 0xf8, 6: 0xfc, 7: 0xfe. */
         right_and_byte = (width & 7) == 0 ? 0xff :
             (uint16_t)0x7f00 >> (((width & 7) * left_delta_inv) & 7);
-        /* fprintf(stderr, "!! width=%d rlen=%d right_and_byte=0x%x bpc=%d\n", width, rlen, (unsigned char)right_and_byte, bpc); */
+        /* fprintf(stderr, "width=%d rlen=%d right_and_byte=0x%x bpc=%d\n", width, rlen, (unsigned char)right_and_byte, bpc); */
         left_delta_inv = ((left_delta_inv + 7) >> 3);
       }
       while (chunk_size > 0) {
@@ -760,6 +805,7 @@ static void read_png(const char *filename, Image *img) {
   if (dp) inflateEnd(&zs);
   if (ferror(f)) die("error reading png");
   fclose(f);
+  if (color_type == CT_INDEXED_RGB) check_palette(img);
 }
 
 /* --- */
@@ -782,6 +828,159 @@ static xbool_t is_gray_ok(const Image *img) {
     if (v != p[0] || v != p[1]) return 0;
   }
   return 1;
+}
+
+/* Size must be divisible by 3 (unchecked).
+ *
+ * Modifies p[:size / 3] in place, storing 1 palette index for each entry.
+ *
+ * Saves the generated palette to palette[:result / 3]. palette must be
+ * preallocated by the caller to hold at least 3 * 256 bytes.
+ *
+ * Returns the byte size of the generated palette (always divisible by 3),
+ * or 1 if there are too many colors.
+ */
+static uint32_t build_palette_from_rgb8(char *p, uint32_t size, char *palette) {
+  /* An open addressing hashtable of 1409 slots (out of which at most 256
+   * will be in use), with linear probing, no rehashing, no deletion.
+   *
+   * * K=[0,r,g,b]=(r<<16)+(g<<8)+b
+   * * h(K)=K%1409 (0 <= K < (1 << 24))
+   * * h(i,K)=-i*(1+(K%1408)) (0 <= i <= 1408)
+   *
+   * Each slot contains (c<<24)+(r<<16)+(g<<8)+b, where r,g,b is the color,
+   * and c is the color index of that color in the palette. An empty slot has
+   * the value of 0. We use has_0000 to distinguish an empty slot from c==0,
+   * r==0, g==0, b==0.
+   */
+  uint32_t hashtable[1409], hk, hik, hv;
+  const unsigned char *pu = (const unsigned char*)p;
+  const unsigned char *puend = pu + size;
+  uint16_t order[256], *op = order, *oq;
+  /* All slots in the hashtable are empty (0). */
+  memset(hashtable, '\0', sizeof(hashtable));
+  for (; pu != puend; pu += 3) {
+    uint32_t v = (uint32_t)pu[0] << 16 | pu[1] << 8 | pu[2];
+    hk = v % 1409;
+    hik = 1 + v % 1408;
+    v |= (uint32_t)1 << 24;
+    for (;; hk -= hk >= hik ? hik : hik - 1409) {
+      hv = hashtable[hk];
+      if (hv == 0) {  /* Free slot. */
+        if (op == order + 256) return 1;  /* Too many different colors. */
+        *op++ = hk;
+        /* fprintf(stderr, "new color v=0x%08x\n", v); */
+        hashtable[hk] = v;
+        break;
+      } else if (hv == v) {  /* Found color v. */
+        break;
+      }
+    }
+  }
+#if 0
+  fprintf(stderr, "palette:\n");
+  for (oq = op, op = order; op != oq; ++op) {
+    const uint32_t v = hashtable[*op];
+    fprintf(stderr, "#%08x oi=%d\n", v, *op);
+  }
+#endif
+
+  if (op - order > 1) {  /* Sort the colors by RGB value. */
+    /* Heapsort algorithm H from Knuth TAOCP 5.2.3. Not stable. */
+    unsigned r = op - order, l = (r >> 1) + 1, i, j;
+    uint16_t *a = order - 1, t;
+    for (;;) {
+      if (l > 1) {
+        t = a[--l];
+      } else {
+        t = a[r];
+        a[r] = a[1];
+        if (--r == 1) break;
+      }
+      for (j = l;;) {
+        i = j;
+        j <<= 1;
+        if (j < r && hashtable[a[j]] < hashtable[a[j + 1]]) ++j;
+        if (j > r || hashtable[t] >= hashtable[a[j]]) {
+          a[i] = t;
+          break;
+        }
+        a[i] = a[j];
+      }
+    }
+    a[1] = t;
+  }
+
+  {
+    uint8_t ci = 0xfe;
+    for (oq = op, op = order; op != oq; ++op, --ci) {
+      const uint32_t v = hashtable[*op];
+      hashtable[*op] = v + (ci << 24);
+      *palette++ = v >> 16;
+      *palette++ = v >> 8;
+      *palette++ = v;
+    }
+  }
+
+  /* Save the indexed image data to *p. */
+  for (pu = (const unsigned char*)p; pu != puend; pu += 3) {
+    uint32_t v = (uint32_t)pu[0] << 16 | pu[1] << 8 | pu[2];
+    hk = v % 1409;
+    hik = 1 + v % 1408;
+    for (;; hk -= hk >= hik ? hik : hik - 1409) {
+      hv = hashtable[hk];
+      if ((hv & 0xffffff) == v) {  /* Found color v. */
+        *p++ = ~(hv >> 24);  /* Store the index. */
+        break;
+      }
+    }
+  }
+
+  return (op - order) * 3;
+}
+
+/* Normalizes the palette of an indexed image: removes unused and duplicate
+ * colors, sorts colors into increasing.
+ */
+static void normalize_palette(Image *img) {
+  char * const palette_map = img->palette;
+  char palette[3 * 256];
+  xbool_t used[256];
+  uint32_t palette_size = img->palette_size;
+  const uint32_t size = img->rlen * img->height;
+  if (img->color_type != CT_INDEXED_RGB || img->bpc != 8) {
+    die("ASSERT: bad image for normalize_palette");
+  }
+  if (palette_size <= 3) return;
+  {  /* Find and clear unused palette entries. */
+    const char *p = img->data, *pend = p + size;
+    char *pa0 = img->palette, *pa = pa0, *paend = pa0 + palette_size;
+    xbool_t *up = used;
+    memset(used, '\0', sizeof(used));
+    for (; p != pend; used[*(unsigned char*)p++] = 1) {}
+    while (pa != paend) {
+      if (*up++) {
+        pa += 3;
+      } else {
+        /* Change unused color to the very first color. */
+        *pa++ = pa0[0]; *pa++ = pa0[1]; *pa++ = pa0[2];
+      }
+    }
+  }
+  palette_size = build_palette_from_rgb8(
+      palette_map, img->palette_size, palette);
+  if (palette_size == 1) die("ASSERT: too many colors in indexed");
+  /* fprintf(stderr, "palette_size: old=%d new=%d\n", img->palette_size, palette_size); */
+  {  /* Apply palette_map (mapping from old to new palette indexes). */
+    char *p = img->data;
+    char * const pend = p + size;
+    for (; p != pend; ++p) {
+      *p = ((unsigned char*)palette_map)[*(unsigned char*)p];
+    }
+  }
+  /* It fits, because palette_size <= img->palette_size. */
+  memcpy(palette_map, palette, palette_size);
+  img->palette_size = palette_size;
 }
 
 /* Converts the image to bpc=to_bpc in place.
@@ -1045,6 +1244,23 @@ static void init_image_chess(Image *img) {
   }
 }
 
+static void init_image_squares(Image *img) {
+  enum { kWidth = 91, kHeight = 84 };  /* For -ansi -pedantic. */
+  const uint32_t width = 91, height = 84;
+  static const char palette[] = "\0\0\0\xff\0\0\0\xff\0\xff\xff\0\1\2\3";
+  uint32_t x, y;
+  char (*img_data)[kHeight][kWidth];
+  alloc_image(img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1);
+  img_data = (char(*)[kHeight][kWidth])img->data;
+  memcpy(img->palette, palette, sizeof(palette) - 1);
+  for (y = 0; y < height; ++y) {
+    for (x = 0; x < width; ++x) {
+      (*img_data)[y][x] = (x >= 50 && x <= 85 && y >= 10 && y <= 50) +
+                          (x >= 10 && x <= 60 && y >= 40 && y <= 80) * 2;
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   Image img;
   const uint8_t predictor_mode = PM_PNGAUTO;
@@ -1057,12 +1273,15 @@ int main(int argc, char **argv) {
   write_pnm("chess2.pgm", &img);
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
-  convert_to_bpc(&img, 1);
+  normalize_palette(&img);
   write_png("chess2i1.png", &img, is_extended, PM_NONE, 9);
+  read_png("chess2i1.png", &img);
   convert_to_bpc(&img, 2);
   write_png("chess2i2.png", &img, is_extended, PM_NONE, 9);
+  read_png("chess2i2.png", &img);
   convert_to_bpc(&img, 4);
   write_png("chess2i4.png", &img, is_extended, PM_NONE, 9);
+  read_png("chess2i4.png", &img);
   convert_to_bpc(&img, 1);
   img.color_type = CT_GRAY;  /* This only works if bpc=1. */
   write_png("chess2g1.png", &img, is_extended, PM_NONE, 9);
@@ -1079,6 +1298,12 @@ int main(int argc, char **argv) {
   write_png("chess2nr.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2.png", &img);
   write_png("chess3.png", &img, is_extended, PM_PNGNONE, 9);
+  dealloc_image(&img);
+  init_image_squares(&img);
+  write_png("square1i8.png", &img, is_extended, PM_NONE, 9);
+  normalize_palette(&img);
+  write_png("square2i8.png", &img, is_extended, PM_NONE, 9);
+
   read_png("beach.png", &img);
   write_png("beach3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
