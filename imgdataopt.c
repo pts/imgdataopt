@@ -703,9 +703,10 @@ static void read_png(const char *filename, Image *img) {
        do_alloc_image:
         alloc_image(img, width, height, bpc, color_type, palette_size);
         left_delta_inv = bpc * img->cpp;
+        right_and_byte = ((width & 7) * left_delta_inv) & 7;
         /* 0: 0xff, 1: 0x80, 2: 0xc0, 3: 0xe0, 4: 0xf0, 5: 0xf8, 6: 0xfc, 7: 0xfe. */
-        right_and_byte = (width & 7) == 0 ? 0xff :
-            (uint16_t)0x7f00 >> (((width & 7) * left_delta_inv) & 7);
+        right_and_byte = right_and_byte == 0 ? 0xff :
+            (uint16_t)0x7f00 >> right_and_byte;
         /* fprintf(stderr, "width=%d rlen=%d right_and_byte=0x%x bpc=%d\n", width, rlen, (unsigned char)right_and_byte, bpc); */
         left_delta_inv = ((left_delta_inv + 7) >> 3);
       }
