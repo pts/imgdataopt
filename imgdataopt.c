@@ -234,13 +234,13 @@ static void alloc_image(
 static INLINE void dealloc_image(Image *img) {
   free(img->data); img->data = NULL;
   free(img->palette); img->palette = NULL;
+  img->palette_size = 0;
 }
 
 /* --- PNM */
 
 /* !! Remove PNM functionality */
 
-/* We relax: we don't check img->color_type == GRAY. */
 static void write_pnm(const char *filename, const Image *img) {
   const uint32_t width = img->width;
   const uint32_t height = img->height;
@@ -253,11 +253,19 @@ static void write_pnm(const char *filename, const Image *img) {
          img->cpp == 3 ? "P6 " : "P5 ",
          (unsigned long)width, (unsigned long)height);
   p = img->data;
-  pend = p + multiply_check(width, height);
+  pend = p + img->rlen * height;
   if (pend < p) die("image too large");
-  for (; p != pend; ++p) {
-    const char c = *p ? '\xff' : '\0';
-    putc(c, f);
+  if (img->color_type == CT_INDEXED_RGB) {
+    const char *palette = img->palette;
+    while (p != pend) {
+      const char *cp = palette + 3 * *(unsigned char*)p++;
+      char c = *cp++;
+      putc(c, f);
+      c = *cp++; putc(c, f);
+      c = *cp; putc(c, f);
+    }
+  } else {
+    fwrite(p, 1, pend - p, f);
   }
   fflush(f);
   if (ferror(f)) die("error writing pgm");
@@ -538,6 +546,9 @@ static void write_png(const char *filename, const Image *img,
   FILE *f;
   char buf[4];
 
+  if (!is_extended && color_type == CT_RGB && bpc != 8) {
+    die("rgb png must have bpc=8");
+  }
   if (predictor_mode < PM_NONE) {
     predictor_mode = PM_NONE;
   } else if (predictor_mode == PM_SMART) {
@@ -825,6 +836,10 @@ static void read_png(const char *filename, Image *img) {
 
 /* --- */
 
+/* Returns bool indicating whether the image can be converted to CT_GRAY without quality loss.
+ *
+ * Only works if img->bpc == 8.
+ */
 static xbool_t is_gray_ok(const Image *img) {
   const char *p, *pend;
   const uint8_t color_type = img->color_type;
@@ -848,6 +863,8 @@ static xbool_t is_gray_ok(const Image *img) {
 
 /* Returns the number of distinct RGB colors used in the image, or 257 if
  * it's more than 257.
+ *
+ * Only works if img->bpc == 8.
  */
 static uint32_t get_color_count(const Image *img) {
   const uint32_t size = img->rlen * img->height;
@@ -910,6 +927,8 @@ static uint32_t get_color_count(const Image *img) {
 
 /* Returns the miniumum RGB bpc value that can be used without quality loss
  * if the image is converted to CT_RGB first.
+ *
+ * Only works if img->bpc == 8.
  */
 static uint8_t get_min_rgb_bpc(const Image *img) {
   char palette[256];
@@ -950,6 +969,8 @@ static uint8_t get_min_rgb_bpc(const Image *img) {
 
 /* Returns the minimum bpc corresponding to img->color_type, i.e. the
  * minimum bpc value suitable for convert_to_bpc without losing precision.
+ *
+ * Only works if img->bpc == 8.
  */
 static uint8_t get_min_bpc(const Image *img) {
   if (img->bpc == 1) return 1;
@@ -1073,6 +1094,8 @@ static uint32_t build_palette_from_rgb8(char *p, uint32_t size, char *palette) {
 
 /* Normalizes the palette of an indexed image: removes unused and duplicate
  * colors, sorts colors into increasing.
+ *
+ * Only works if img->bpc == 8.
  */
 static void normalize_palette(Image *img) {
   char * const palette_map = img->palette;
@@ -1113,6 +1136,49 @@ static void normalize_palette(Image *img) {
   /* It fits, because palette_size <= img->palette_size. */
   memcpy(palette_map, palette, palette_size);
   img->palette_size = palette_size;
+}
+
+/* Converts the image to CT_RGB.
+ *
+ * Only works if img->bpc == 8.
+ */
+static void convert_to_rgb(Image *img) {
+  const uint32_t width3 = multiply_check(img->width, 3);
+  const uint32_t new_size = multiply_check(width3, img->height);
+  const uint32_t rlen_height = img->rlen * img->height;
+  const uint8_t color_type = img->color_type;
+  char *op = img->data;
+  const char *p = op, *pend;
+  if (color_type == CT_RGB) return;
+  if (img->bpc != 8) die("ASSERT: convert_to_rgb needs bpc=8");
+  if (img->alloced < new_size) {
+    p = img->data = op = (char*)realloc(op, new_size);
+    if (!op) die("out of memory");
+    img->alloced = new_size;
+  }
+  p += new_size - rlen_height;
+  memmove((char*)p, op, rlen_height);
+  pend = p + rlen_height;
+  img->color_type = CT_RGB;
+  img->rlen = width3;
+  img->cpp = 3;
+  if (color_type == CT_INDEXED_RGB) {
+    const char *palette = img->palette;
+    while (p != pend) {
+      const char *cp = palette + 3 * *(unsigned char*)p++;
+      *op++ = *cp++; *op++ = *cp++; *op++ = *cp;
+    }
+    free(img->palette);
+    img->palette = NULL;
+    img->palette_size = 0;
+  } else if (color_type == CT_GRAY) {
+    while (p != pend) {
+      const char v = *p++;
+      *op++ = v; *op++ = v; *op++ = v;
+    }
+  } else {
+    die("ASSERT: bad color_type");
+  }
 }
 
 /* Converts the image to bpc=to_bpc in place.
@@ -1435,6 +1501,17 @@ int main(int argc, char **argv) {
   convert_to_bpc(&img, 8);
   /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g8.png", &img, is_extended, PM_NONE, 9);
+  convert_to_rgb(&img);
+  /* color_type=2 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
+  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  write_png("chess2r8.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 4);
+  write_png("chess2r4.png", &img, 1, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 2);
+  write_png("chess2r2.png", &img, 1, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 1);
+  write_png("chess2r1.png", &img, 1, PM_PNGAUTO, 9);
+
   read_png("chess2i1.png", &img);
   write_png("chess2i1w.png", &img, 1, predictor_mode, 9);
   read_png("chess2n.png", &img);
@@ -1443,19 +1520,40 @@ int main(int argc, char **argv) {
   write_png("chess3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
   init_image_squares(&img);
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /* color_type=3 bpc=8 is_gray_ok=0 min_bpc=2 min_rgb_bpc=1 color_count=4 */
+  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("square1i8.png", &img, is_extended, PM_NONE, 9);
   normalize_palette(&img);
   write_png("square2i8.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 2);
   /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("square2i2.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 8);
+  convert_to_rgb(&img);
+  /* color_type=2 bpc=8 is_gray_ok=0 min_bpc=1 min_rgb_bpc=1 color_count=4 */
+  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  write_pnm("square2.ppm", &img);
+  write_png("square2r8.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 4);
+  write_png("square2r4.png", &img, 1, PM_PNGAUTO, 9);
+  read_png("square2r4.png", &img);
+  convert_to_bpc(&img, 8);
+  write_png("square2r48.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 2);
+  write_png("square2r2.png", &img, 1, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 8);
+  write_png("square2r28.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 1);
+  write_png("square2r1.png", &img, 1, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 8);
+  write_png("square2r18.png", &img, is_extended, PM_PNGAUTO, 9);
 
   read_png("beach.png", &img);
   /* color_type=2 bpc=8 is_gray_ok=0 min_bpc=8 min_rgb_bpc=8 color_count=257 */
   fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("beach3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
+
 
   return 0;
 }
