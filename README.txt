@@ -115,7 +115,7 @@ Features and comparison
   use color 0 for the rest of the image.
 
 * imgdataopt can write PNG-like files with RGB and bit depth smaller than 8.
-  To get this, use `igmdataopt -j;ext'.
+  To get this, use `igmdataopt -j:ext'.
 
 Motivation
 ~~~~~~~~~~
