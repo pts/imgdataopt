@@ -9,8 +9,6 @@
 
 #define local static
 
-local uLong adler32_combine_(uLong adler1, uLong adler2, z_off64_t len2);
-
 #define BASE 65521UL    /* largest prime smaller than 65536 */
 #define NMAX 5552
 /* NMAX is the largest n such that 255n(n+1)/2 + (n+1)(BASE-1) <= 2^32-1 */
@@ -124,6 +122,9 @@ uLong ZEXPORT adler32(uLong adler, const Bytef *buf, uInt len)
     return adler | (sum2 << 16);
 }
 
+#ifndef NO_COMBINE64
+local uLong adler32_combine_(uLong adler1, uLong adler2, z_off64_t len2);
+
 /* ========================================================================= */
 local uLong adler32_combine_(uLong adler1, uLong adler2, z_off64_t len2)
 {
@@ -155,3 +156,4 @@ uLong ZEXPORT adler32_combine64(uLong adler1, uLong adler2, z_off64_t len2)
 {
     return adler32_combine_(adler1, adler2, len2);
 }
+#endif

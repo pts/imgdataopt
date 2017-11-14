@@ -64,13 +64,6 @@
 #  define TBLS 1
 #endif /* BYFOUR */
 
-/* Local functions for crc concatenation */
-local unsigned long gf2_matrix_times OF((unsigned long *mat,
-                                         unsigned long vec));
-local void gf2_matrix_square OF((unsigned long *square, unsigned long *mat));
-local uLong crc32_combine_(uLong crc1, uLong crc2, z_off64_t len2);
-
-
 #ifdef DYNAMIC_CRC_TABLE
 
 local volatile int crc_table_empty = 1;
@@ -331,6 +324,13 @@ local unsigned long crc32_big(unsigned long crc, const unsigned char FAR *buf, u
 
 #define GF2_DIM 32      /* dimension of GF(2) vectors (length of CRC) */
 
+#ifndef NO_COMBINE64
+/* Local functions for crc concatenation */
+local unsigned long gf2_matrix_times OF((unsigned long *mat,
+                                         unsigned long vec));
+local void gf2_matrix_square OF((unsigned long *square, unsigned long *mat));
+local uLong crc32_combine_(uLong crc1, uLong crc2, z_off64_t len2);
+
 /* ========================================================================= */
 local unsigned long gf2_matrix_times(unsigned long *mat, unsigned long vec)
 {
@@ -418,3 +418,4 @@ uLong ZEXPORT crc32_combine64(uLong crc1, uLong crc2, z_off64_t len2)
 {
     return crc32_combine_(crc1, crc2, len2);
 }
+#endif
