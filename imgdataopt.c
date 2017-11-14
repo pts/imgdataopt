@@ -784,9 +784,14 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
         if (chunk_size == 0 || chunk_size > 3 * 256 || chunk_size % 3 != 0) {
           die("bad png palette size");
         }
-        if (chunk_size > (3U << bpc)) die("png palette too long");
         if (palette_size != 0) die("dupicate png palette");
-        palette_size = chunk_size;
+        if (chunk_size > (3U << bpc)) {
+          /* This is harmless, not failing. */
+          /* die("png palette too long"); */
+          palette_size = 3U << bpc;
+        } else {
+          palette_size = chunk_size;
+        }
         goto do_alloc_image;
       }
       if (is_idat && !img->data) {
@@ -808,7 +813,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
             chunk_size : sizeof(buf);
         if (want != fread(buf, 1, want, f)) die("eof in png chunk");
         if (is_plte) {
-          if (want != palette_size) die("ASSERT: png palette buf too small");
+          if (want != chunk_size) die("ASSERT: png palette buf too small");
           memcpy(img->palette, buf, palette_size);
         } else if (is_idat) {
           if (!dp) {
@@ -1783,7 +1788,7 @@ static void regression_test() {
   read_png("chess2n.png", &img);
   write_png("chess3ni8.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_gray(&img);
-  write_png("chess3ng1.png", &img, is_extended, PM_PNGAUTO, 9);
+  write_png("chess3ng8.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 8);
   convert_to_indexed(&img);
   /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
