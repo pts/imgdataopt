@@ -73,6 +73,8 @@ void *memset(void *s, int c, size_t n);
 void *memcpy(void *dest, const void *src, size_t n);
 void *memmove(void *dest, const void *src, size_t n);
 int memcmp(const void *s1, const void *s2, size_t n);
+int strcmp(const char *s1, const char *s2);
+size_t strlen(const char *s);
 /* stdio.h */
 #define SEEK_SET 0
 typedef struct FILE FILE;
@@ -84,6 +86,7 @@ void *realloc(void *ptr, size_t size);
 FILE *fopen(const char *path, const char *mode);
 int fprintf(FILE *stream, const char *format, ...);
 int putc(int c, FILE *stream);
+int getc(FILE *stream);
 size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
 int fseek(FILE *stream, long offset, int whence);
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
