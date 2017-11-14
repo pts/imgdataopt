@@ -853,11 +853,6 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
               zs.next_out = (Bytef*)dp;
               zs.avail_out = rlen;
             } else if (filter != PNG_FILTER_DEFAULT) {  /* PM_NONE */
-              uint32_t y = height;
-              for (; y > 0; --y) {
-                dp += rlen;
-                dp[-1] &= right_and_byte;
-              }
               d_remaining = 0;
             } else {
               /* Now we've predictor and dp[:rlen] as the current row ready. */
@@ -894,7 +889,9 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
                default: ; /* No special action needed for PNG_PR_NONE. */
                 dp = dpend;
               }
-              dp[-1] &= right_and_byte;
+              /* We don't do `dp[-1] &= right_and_byte;' here, because it
+               * would affect the output of the predictor in the next row.
+               */
               d_remaining -= rlen;
               zs.next_out = (Bytef*)&predictor;
               zs.avail_out = d_remaining != 0;
@@ -921,6 +918,11 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
     fprintf(stderr, "warning: png image data too short\n");
     /* TODO(pts): Make it white instead on RGB and gray. */
     memset(dp, '\0', d_remaining);
+  }
+  if ((unsigned char)right_and_byte != 255) {
+    uint32_t y;
+    for (y = height, dp = dp0 + (rlen - 1); y > 0;
+         *dp &= right_and_byte, dp += rlen, --y) {}
   }
   if (dp) inflateEnd(&zs);
   if (force_bpc8) convert_to_bpc(img, 8);
