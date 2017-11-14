@@ -1390,7 +1390,7 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
             *op++ = v >> 4;
             *op++ = v & 15;
           }
-          if (i != 0) *op++ = *p++ >> 4;
+          if (i != 0) *op++ = *(unsigned char*)p++ >> 4;
         }
       } else if (bpc == 2) {
         for (; h1 > 0; --h1) {
