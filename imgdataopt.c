@@ -2,6 +2,8 @@
  * imgdataopt: raster (bitmap) image data size optimizer
  * by pts@fazekas.hu at Mon Nov  6 18:50:40 CET 2017
  *
+ * This is free software, under GNU GPL >=2. NO WARRANTY. Use at your own risk!
+ *
  * Compilation:
  * * xstatic gcc -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -lz
  * Also works with g++ -ansi -pedantic ...
@@ -15,7 +17,6 @@
  * Also works with tcc 0.9.25 (and pts-tcc 0.9.25): tcc -c -O2 -W -Wall -Wextra -Werror imgdataopt.c && gcc -m32 -o imgdataopt imgdataopt.o -lz
  */
 
-/* !! add license */
 /* !! compile the final version with g++ */
 /* !! check: ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
 /* !! check: nonvalidating PNG parser: properly ignore checksums */
