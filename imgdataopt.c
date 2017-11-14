@@ -1350,14 +1350,14 @@ static void convert_to_indexed(Image *img) {
     img->palette = palette;
     img->palette_size = 3 * 256;
     normalize_palette(img);
-    img->palette = xmalloc(img->palette_size);
+    img->palette = (char*)xmalloc(img->palette_size);
     memcpy(img->palette, palette, img->palette_size);
   } else if (color_type == CT_RGB) {
     const uint32_t palette_size = build_palette_from_rgb8(
         img->data, rlen_height, palette);
     if (palette_size < 3) die("too many colors to convert to indexed");
     img->palette_size = palette_size;
-    memcpy(img->palette = xmalloc(palette_size), palette, palette_size);
+    memcpy(img->palette = (char*)xmalloc(palette_size), palette, palette_size);
   } else {
     die("ASSERT: bad color_type for convert_to_indexed");
   }
