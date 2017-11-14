@@ -250,8 +250,8 @@ static void write_pnm(const char *filename, const Image *img) {
   if (img->cpp != 1 && img->cpp != 3) die("need cpp=1 or =3 for writing pgm/ppm");
   if (!(f = fopen(filename, "wb"))) die("error writing pgm");
   fprintf(f, "%s%lu %lu 255\n",
-         img->cpp == 3 ? "P6 " : "P5 ",
-         (unsigned long)width, (unsigned long)height);
+          img->color_type == CT_GRAY ? "P5 " : "P6 ",
+          (unsigned long)width, (unsigned long)height);
   p = img->data;
   pend = p + img->rlen * height;
   if (pend < p) die("image too large");
@@ -1177,7 +1177,43 @@ static void convert_to_rgb(Image *img) {
       *op++ = v; *op++ = v; *op++ = v;
     }
   } else {
-    die("ASSERT: bad color_type");
+    die("ASSERT: bad color_type for convert_to_rgb");
+  }
+}
+
+/* Converts the image to CT_GRAY.
+ *
+ * Only works if img->bpc == 8.
+ */
+static void convert_to_gray(Image *img) {
+  const uint32_t rlen_height = img->rlen * img->height;
+  const uint8_t color_type = img->color_type;
+  char *op = img->data;
+  const char *p = op, *pend = p + rlen_height;
+  if (color_type == CT_GRAY) return;
+  if (img->bpc != 8) die("ASSERT: convert_to_gray needs bpc=8");
+  img->color_type = CT_GRAY;
+  img->rlen = img->width;
+  img->cpp = 1;
+  if (color_type == CT_INDEXED_RGB) {
+    const char *palette = img->palette;
+    while (op != pend) {
+      const char *cp = palette + 3 * *(unsigned char*)op;
+      const char v = *cp++;
+      if (v != *cp++ || v != *cp) die("cannot convert to gray");
+      *op++ = v;
+    }
+    free(img->palette);
+    img->palette = NULL;
+    img->palette_size = 0;
+  } else if (color_type == CT_RGB) {
+    while (p != pend) {
+      const char v = *p++;
+      if (v != *p++ || v != *p++) die("cannot convert to gray");
+      *op++ = v;
+    }
+  } else {
+    die("ASSERT: bad color_type for convert_to_gray");
   }
 }
 
@@ -1471,7 +1507,7 @@ int main(int argc, char **argv) {
   init_image_chess(&img);
   /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
   fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
-  write_pnm("chess2.pgm", &img);
+  write_pnm("chess2.ppm", &img);
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
   normalize_palette(&img);
@@ -1511,13 +1547,29 @@ int main(int argc, char **argv) {
   write_png("chess2r2.png", &img, 1, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 1);
   write_png("chess2r1.png", &img, 1, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 8);
+  convert_to_gray(&img);
+  /* color_type=0 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
+  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  write_pnm("chess3.pgm", &img);
+  write_png("chess3g8.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 4);
+  write_png("chess3g4.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 2);
+  write_png("chess3g2.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_bpc(&img, 1);
+  write_png("chess3g1.png", &img, is_extended, PM_PNGAUTO, 9);
+  read_png("chess2n.png", &img);
+  write_png("chess3ni8.png", &img, is_extended, PM_PNGAUTO, 9);
+  convert_to_gray(&img);
+  write_png("chess3ng1.png", &img, is_extended, PM_PNGAUTO, 9);
 
   read_png("chess2i1.png", &img);
   write_png("chess2i1w.png", &img, 1, predictor_mode, 9);
   read_png("chess2n.png", &img);
   write_png("chess2nr.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2.png", &img);
-  write_png("chess3.png", &img, is_extended, PM_PNGNONE, 9);
+  write_png("chess4.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
   init_image_squares(&img);
   /* color_type=3 bpc=8 is_gray_ok=0 min_bpc=2 min_rgb_bpc=1 color_count=4 */
