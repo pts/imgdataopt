@@ -200,6 +200,7 @@ static void noalloc_image(Image *img) {
   img->data = img->palette = NULL;
 }
 
+/* Keeps the byes in img->data and img->palette uninitialized. */
 static void alloc_image(
     Image *img, uint32_t width, uint32_t height, uint8_t bpc,
     uint8_t color_type, uint32_t palette_size) {
@@ -211,6 +212,9 @@ static void alloc_image(
       bpc == 2 ? ((samples_per_row + 3) >> 2) :
       bpc == 1 ? ((samples_per_row + 7) >> 3) : 0;
   const uint32_t alloced = multiply_check(rlen, height);
+  if (bpc != 1 && bpc != 2 && bpc != 4 && bpc != 8) die("bad bpc");
+  if (color_type != CT_RGB && color_type != CT_GRAY &&
+      color_type != CT_INDEXED_RGB) die("bad color_type");
   add_check(multiply_check(rlen, 7), 1);  /* Early upper limit. */
   img->width = width;
   img->height = height;
@@ -221,6 +225,7 @@ static void alloc_image(
   img->cpp = cpp;
   if (palette_size == 0 && color_type == CT_INDEXED_RGB) palette_size = 3 * 256;
   if (palette_size != 0 && color_type != CT_INDEXED_RGB) palette_size = 0;
+  if (palette_size % 3 != 0) die("bad palette_size");
   img->palette_size = palette_size;
   img->data = (char*)xmalloc(alloced);
   img->palette = (char*)xmalloc(palette_size);
@@ -1112,7 +1117,7 @@ static void normalize_palette(Image *img) {
 
 /* Converts the image to bpc=to_bpc in place.
  *
- * Assumes (but doesn't check) that the conversion is lossless.
+ * Checks that the conversion is lossless.
  */
 static void convert_to_bpc(Image *img, uint8_t to_bpc) {
   /* alloc_image guarantees that there is no overflow here. */
@@ -1235,6 +1240,10 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
     img->rlen = spr;
     p = op = img->data;
   }
+  if (to_bpc == 8) return;
+  if (to_bpc < get_min_bpc(img)) {
+    die("decreasing bpc would cause quality loss");
+  }
   if (img->color_type == CT_INDEXED_RGB) {
     if (to_bpc == 1) {
       for (; height > 0; --height) {
@@ -1287,7 +1296,6 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
         }
       }
       img->rlen = (spr + 1) >> 1;
-    } else if (to_bpc == 8) {
     } else {
       die("ASSERT: bad to_bpc");
     }
@@ -1343,7 +1351,6 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
         }
       }
       img->rlen = (spr + 1) >> 1;
-    } else if (to_bpc == 8) {
     } else {
       die("ASSERT: bad to_bpc");
     }
