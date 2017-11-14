@@ -298,12 +298,71 @@ static void write_pnm(const char *filename, const Image *img) {
   fclose(f);
 }
 
+/* Returns the following character (by getc(f)). */
+static int parse_u32_decimal(FILE *f, int c, uint32_t *result) {
+  uint32_t r;
+  if ((c -= '0') + 0U > 9U) die("decimal expected");
+  r = c;
+  for (;;) {
+    if ((c = getc(f)) < 0 || (c - '0') + 0U > 9U) {
+      *result = r;
+      return c;
+    }
+    r = add_check(multiply_check(10, r), c - '0');
+  }
+}
+
 /* img must be initialized (at least noalloc_image).
- * Doesn't support all features of PNM (e.g. ASCII and comments).
+ *
+ * Doesn't support all features of PNM (e.g. ASCII, comments, multiple
+ * separator whitespace bytes, and maxval != 255).
  */
-static void read_pnm_stream(FILE *f, Image *img) {
-  (void)f; (void)img;
-  die("!! not supported read_pnm_stream");
+static void read_pnm_stream(FILE *f, Image *img, xbool_t force_bpc8) {
+  const uint32_t palette_size = 0;
+  uint32_t width, height, maxval;
+  int c, st;
+  uint32_t rlen_height;
+  if ((c = getc(f)) != 'P' ||
+      ((st = getc(f)) != '4' && st != '5' && st != '6')
+     ) die("bad signature in pnm");
+  if ((c = getc(f)) != ' ' && c != '\n' && c != '\r' && c != '\t'
+     ) die("whitespace expected in pnm");
+  c = parse_u32_decimal(f, getc(f), &width);
+  if (c != ' ' && c != '\n' && c != '\r' && c != '\t'
+     ) die("whitespace expected in pnm");
+  c = parse_u32_decimal(f, getc(f), &height);
+  if (c != ' ' && c != '\n' && c != '\r' && c != '\t'
+     ) die("whitespace expected in pnm");
+  if (st == '4') {
+    char *p, *pend;
+    alloc_image(img, width, height, 1, CT_GRAY, palette_size, force_bpc8);
+    rlen_height = img->rlen * height;
+    p = img->data; pend = p + rlen_height;
+    if (rlen_height != fread(p, 1, rlen_height, f)
+       ) die("eof in pnm data");
+    if ((width & 7) == 0) {
+      for (; p != pend; *p++ ^= -1) {}  /* Invert in place. */
+    } else {
+      const uint32_t rlen1 = img->rlen - 1;
+      const char right_and_byte = (uint16_t)0x7f00 >> (width & 7);
+      for (; height > 0; --height) {
+        for (pend = p + rlen1; p != pend; *p++ ^= -1) {}
+        *p = ~*p & right_and_byte;
+        ++p;
+      }
+    }
+  } else {
+    c = parse_u32_decimal(f, getc(f), &maxval);
+    if (c != ' ' && c != '\n' && c != '\r' && c != '\t'
+       ) die("whitespace expected in pnm");
+    if (maxval != 255) die("not supported pnm maxval");
+    alloc_image(img, width, height, 8, st == '5' ? CT_GRAY : CT_RGB,
+                palette_size, force_bpc8);
+    rlen_height = img->rlen * height;
+    if (rlen_height != fread(img->data, 1, rlen_height, f)
+       ) die("eof in pnm data");
+  }
+  if (force_bpc8) convert_to_bpc(img, 8);
 }
 
 /* --- PNG */
@@ -1552,8 +1611,7 @@ static void read_image(const char *filename, Image *img, xbool_t force_bpc8) {
     read_png_stream(f, img, force_bpc8);
   } else if (buf[0] == 'P' && (buf[1] == '4' || buf[1] == '5' || buf[1] == '6')) {
     /* We support only the subset of the PNM format. */
-    read_pnm_stream(f, img);
-    if (force_bpc8) convert_to_bpc(img, 8);
+    read_pnm_stream(f, img, force_bpc8);
   } else {
     die("unknown input image format");
   }
