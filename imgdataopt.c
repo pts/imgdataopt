@@ -822,10 +822,11 @@ static void read_png(const char *filename, Image *img) {
 
 static xbool_t is_gray_ok(const Image *img) {
   const char *p, *pend;
+  const uint8_t color_type = img->color_type;
   if (img->bpc != 8) die("ASSERT: is_gray_ok needs bpc=8");
-  if (img->color_type == CT_GRAY) {
+  if (color_type == CT_GRAY) {
     return 1;
-  } else if (img->color_type == CT_INDEXED_RGB) {
+  } else if (color_type == CT_INDEXED_RGB) {
     p = img->palette;
     pend = p + img->palette_size;
   } else {
@@ -838,6 +839,122 @@ static xbool_t is_gray_ok(const Image *img) {
     if (v != p[0] || v != p[1]) return 0;
   }
   return 1;
+}
+
+/* Returns the number of distinct RGB colors used in the image, or 257 if
+ * it's more than 257.
+ */
+static uint32_t get_color_count(const Image *img) {
+  const uint32_t size = img->rlen * img->height;
+  const uint8_t color_type = img->color_type;
+  uint32_t color_count = 0;
+  const unsigned char *pu = (const unsigned char*)img->data;
+  const unsigned char *puend = pu + size;
+  char palette[3 * 256];
+  if (img->bpc != 8) die("ASSERT: get_min_indexed_colors needs bpc=8");
+  if (color_type == CT_RGB) {
+    /* An open addressing hashtable. See build_palette_from_rgb8 for more. */
+    uint32_t hashtable[1409], hk, hik, hv;
+   count_rgb_colors:
+    /* All slots in the hashtable are empty (0). */
+    memset(hashtable, '\0', sizeof(hashtable));
+    for (; pu != puend; pu += 3) {
+      uint32_t v = (uint32_t)pu[0] << 16 | pu[1] << 8 | pu[2];
+      hk = v % 1409;
+      hik = 1 + v % 1408;
+      v |= (uint32_t)1 << 24;
+      for (;; hk -= hk >= hik ? hik : hik - 1409) {
+        hv = hashtable[hk];
+        if (hv == 0) {  /* Free slot. */
+          /* Without the early `return' here, the hashtable would become
+           * full, and we'd get an infinite loop.
+           */
+          if (++color_count > 256) return color_count;
+          hashtable[hk] = v;
+          break;
+        } else if (hv == v) {  /* Found color v. */
+          break;
+        }
+      }
+    }
+  } else {
+    unsigned char used[256];
+    memset(used, '\0', sizeof(used));
+    for (; pu != puend; used[*pu++] = 1) {}
+    pu = used; puend = used + 256;
+    if (color_type == CT_GRAY) {
+      for (; pu != puend; color_count += *pu++) {}
+    } else if (color_type == CT_INDEXED_RGB) {
+      const char *cp = img->palette;
+      char *pp = palette;
+      puend = pu + img->palette_size / 3;
+      while (pu != puend) {
+        if (*pu++ != 0) {
+          *pp++ = *cp++; *pp++ = *cp++; *pp++ = *cp++;
+        } else {
+          cp += 3;
+        }
+      }
+      pu = (const unsigned char*)palette;
+      puend = (const unsigned char*)pp;
+      goto count_rgb_colors;
+    }
+  }
+  return color_count;
+}
+
+/* Returns the miniumum RGB bpc value that can be used without quality loss
+ * if the image is converted to CT_RGB first.
+ */
+static uint8_t get_min_rgb_bpc(const Image *img) {
+  char palette[256];
+  const char *p, *pend;
+  uint8_t bpc1 = 0;
+  const uint32_t size = img->rlen * img->height;
+  if (img->bpc != 8) die("ASSERT: get_min_rgb_bpc needs bpc=8");
+  if (img->color_type == CT_INDEXED_RGB) {
+    unsigned char used[256];
+    const unsigned char *pu = (const unsigned char*)img->data;
+    const unsigned char *puend = pu + size;
+    const char *cp = img->palette;
+    char *pp = palette;
+
+    memset(used, '\0', sizeof(used));
+    for (; pu != puend; used[*pu++] = 1) {}
+    pu = used;  puend = pu + img->palette_size / 3;
+    while (pu != puend) {
+      if (*pu++ != 0) {
+        *pp++ = *cp++; *pp++ = *cp++; *pp++ = *cp++;
+      } else {
+        cp += 3;
+      }
+    }
+    p = palette; pend = pp;
+  } else {
+    p = img->data; pend = p + size;
+  }
+  while (p != pend) {
+    const unsigned char v = *p++;
+    /* TODO(pts): Would a lookup table be faster here? */
+    if ((v >> 4) != (v & 15)) return 8;
+    if ((((v >> 2) ^ v) & 3) != 0) bpc1 |= 3;
+    if ((((v >> 1) ^ v) & 1) != 0) bpc1 |= 1;
+  }
+  return bpc1 + 1;
+}
+
+/* Returns the minimum bpc corresponding to img->color_type, i.e. the
+ * minimum bpc value suitable for convert_to_bpc without losing precision.
+ */
+static uint8_t get_min_bpc(const Image *img) {
+  if (img->bpc == 1) return 1;
+  if (img->bpc != 8) die("ASSERT: get_min_bpc needs bpc=8");
+  if (img->color_type == CT_INDEXED_RGB) {
+    const uint32_t color_count = get_color_count(img);
+    return color_count > 16 ? 8 : color_count > 4 ? 4 : color_count > 2 ? 2 : 1;
+  } else {
+    return get_min_rgb_bpc(img);
+  }
 }
 
 /* Size must be divisible by 3 (unchecked).
@@ -1279,28 +1396,37 @@ int main(int argc, char **argv) {
 
   (void)argc; (void)argv;
   init_image_chess(&img);
-  fprintf(stderr, "is_gray_ok=%d\n", is_gray_ok(&img));  /* : 1 */
+  /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
+  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_pnm("chess2.pgm", &img);
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
   normalize_palette(&img);
+  /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
+  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  convert_to_bpc(&img, 1);
   write_png("chess2i1.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i1.png", &img);
   convert_to_bpc(&img, 2);
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2i2.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i2.png", &img);
   convert_to_bpc(&img, 4);
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2i4.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i4.png", &img);
   convert_to_bpc(&img, 1);
   img.color_type = CT_GRAY;  /* This only works if bpc=1. */
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g1.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 2);
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g2.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 4);
   write_png("chess2g4.png", &img, is_extended, PM_NONE, 9);
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   convert_to_bpc(&img, 8);
-  fprintf(stderr, "is_gray_ok=%d\n", is_gray_ok(&img));  /* : 1 */
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g8.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i1.png", &img);
   write_png("chess2i1w.png", &img, 1, predictor_mode, 9);
@@ -1310,11 +1436,17 @@ int main(int argc, char **argv) {
   write_png("chess3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
   init_image_squares(&img);
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("square1i8.png", &img, is_extended, PM_NONE, 9);
   normalize_palette(&img);
   write_png("square2i8.png", &img, is_extended, PM_NONE, 9);
+  convert_to_bpc(&img, 2);
+  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  write_png("square2i2.png", &img, is_extended, PM_NONE, 9);
 
   read_png("beach.png", &img);
+  /* color_type=2 bpc=8 is_gray_ok=0 min_bpc=8 min_rgb_bpc=8 color_count=257 */
+  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("beach3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
 

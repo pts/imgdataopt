@@ -7,11 +7,15 @@ DOCKER_CROSSBUILD = docker run -v "$$PWD:/workdir" -u "$$(id -u):$$(id -g)" --rm
 .PHONY: all clean
 all: imgdataopt
 
+# -Werror=implicit-function-declaration works with gcc-4.1.
 imgdataopt: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
-	$(CC) -Izlib_src -DNO_VIZ -ansi -pedantic -s -O2 -W -Wall -Wextra $(CFLAGS) -o imgdataopt imgdataopt.c zlib_src/zall.c
+	$(CC) -Izlib_src -DNO_VIZ -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror=implicit-function-declaration $(CFLAGS) -o imgdataopt imgdataopt.c zlib_src/zall.c
+# Debug mode.
+imgdataopt.yes: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
+	$(CC) -Izlib_src -DNO_VIZ -ansi -pedantic -g -O2 -W -Wall -Wextra -Werror=implicit-function-declaration $(CFLAGS) -o imgdataopt.yes imgdataopt.c zlib_src/zall.c
 # Like imgdataopt, but with the system's zlib (-lz) instead of the bundled zlib.
 imgdataopt.lz: imgdataopt.c
-	$(CC) -ansi -pedantic -s -O2 -W -Wall -Wextra $(CFLAGS) -o imgdataopt.lz imgdataopt.c -lz
+	$(CC) -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror=implicit-function-declaration $(CFLAGS) -o imgdataopt.lz imgdataopt.c -lz
 
 imgdataopt.xstatic: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections -Izlib_src -DNO_VIZ -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror $(CFLAGS) -o imgdataopt.xstatic imgdataopt.c zlib_src/zall.c
@@ -30,4 +34,4 @@ imgdataopt.darwinc64: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 	$(DOCKER_CROSSBUILD) /usr/osxcross/bin/x86_64-apple-darwin14-strip imgdataopt.darwinc64
 
 clean:
-	rm -f core imgdataopt imgdataopt.lz imgdataopt.exe imgdataopt.xstatic imgdataopt.xstatico3 imgdataopt.darwinc32 imgdataopt.darwinc64 *.o zlib_src/*.o
+	rm -f core imgdataopt imgdataopt.yes imgdataopt.lz imgdataopt.exe imgdataopt.xstatic imgdataopt.xstatico3 imgdataopt.darwinc32 imgdataopt.darwinc64 *.o zlib_src/*.o
