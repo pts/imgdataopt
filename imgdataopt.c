@@ -15,6 +15,7 @@
  * Also works with tcc 0.9.25 (and pts-tcc 0.9.25): tcc -c -O2 -W -Wall -Wextra -Werror imgdataopt.c && gcc -m32 -o imgdataopt imgdataopt.o -lz
  */
 
+/* !! add license */
 /* !! compile the final version with g++ */
 /* !! check: ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
 /* !! check: nonvalidating PNG parser: properly ignore checksums */
@@ -203,7 +204,7 @@ static void noalloc_image(Image *img) {
 /* Keeps the byes in img->data and img->palette uninitialized. */
 static void alloc_image(
     Image *img, uint32_t width, uint32_t height, uint8_t bpc,
-    uint8_t color_type, uint32_t palette_size) {
+    uint8_t color_type, uint32_t palette_size, xbool_t do_alloc_bpc8) {
   const uint8_t cpp = (color_type == CT_RGB ? 3 : 1);
   const uint32_t samples_per_row = add0_check(multiply_check(width, cpp), 2);
   /* Number of bytes in a row. */
@@ -211,7 +212,8 @@ static void alloc_image(
       bpc == 4 ? ((samples_per_row + 1) >> 1) :
       bpc == 2 ? ((samples_per_row + 3) >> 2) :
       bpc == 1 ? ((samples_per_row + 7) >> 3) : 0;
-  const uint32_t alloced = multiply_check(rlen, height);
+  const uint32_t alloced =
+      multiply_check(do_alloc_bpc8 ? samples_per_row : rlen, height);
   if (bpc != 1 && bpc != 2 && bpc != 4 && bpc != 8) die("bad bpc");
   if (color_type != CT_RGB && color_type != CT_GRAY &&
       color_type != CT_INDEXED_RGB) die("bad color_type");
@@ -237,39 +239,71 @@ static INLINE void dealloc_image(Image *img) {
   img->palette_size = 0;
 }
 
+static void convert_to_bpc(Image *img, uint8_t to_bpc);
+
 /* --- PNM */
 
-/* !! Remove PNM functionality */
+/* !! Add -DNO_PNM option to remove PNM functionality. */
 
 static void write_pnm(const char *filename, const Image *img) {
   const uint32_t width = img->width;
-  const uint32_t height = img->height;
-  const char *p, *pend;
+  uint32_t height = img->height;
+  const char *p = img->data, *pend = p + img->rlen * height;
   FILE *f;
-  if (img->bpc != 8) die("need bpc=8 for writing pgm/ppm");
-  if (img->cpp != 1 && img->cpp != 3) die("need cpp=1 or =3 for writing pgm/ppm");
-  if (!(f = fopen(filename, "wb"))) die("error writing pgm");
-  fprintf(f, "%s%lu %lu 255\n",
-          img->color_type == CT_GRAY ? "P5 " : "P6 ",
-          (unsigned long)width, (unsigned long)height);
-  p = img->data;
-  pend = p + img->rlen * height;
-  if (pend < p) die("image too large");
-  if (img->color_type == CT_INDEXED_RGB) {
-    const char *palette = img->palette;
-    while (p != pend) {
-      const char *cp = palette + 3 * *(unsigned char*)p++;
-      char c = *cp++;
-      putc(c, f);
-      c = *cp++; putc(c, f);
-      c = *cp; putc(c, f);
+  if (img->bpc == 1 && img->color_type == CT_GRAY) {  /* PBM. */
+    if (!(f = fopen(filename, "wb"))) die("error writing pnm");
+    fprintf(f, "P4 %lu %lu\n", (unsigned long)width, (unsigned long)height);
+    if ((width & 7) == 0) {
+      while (p != pend) {
+        const char c = ~*p++;
+        putc(c, f);
+      }
+    } else {
+      const uint32_t rlen1 = img->rlen - 1;
+      const char right_and_byte = (uint16_t)0x7f00 >> (width & 7);
+      for (; height > 0; --height) {
+        for (pend = p + rlen1; p != pend;) {
+          const char c = ~*p++;
+          putc(c, f);
+        }
+        {
+          const char c = ~*p++ & right_and_byte;
+          putc(c, f);
+        }
+      }
     }
   } else {
-    fwrite(p, 1, pend - p, f);
+    if (img->bpc != 8) die("need bpc=8 for writing pnm");
+    if (img->cpp != 1 && img->cpp != 3) die("need cpp=1 or =3 for writing pnm");
+    if (!(f = fopen(filename, "wb"))) die("error writing pnm");
+    fprintf(f, "%s%lu %lu 255\n",
+            img->color_type == CT_GRAY ? "P5 " : "P6 ",
+            (unsigned long)width, (unsigned long)height);
+    if (pend < p) die("image too large");
+    if (img->color_type == CT_INDEXED_RGB) {
+      const char *palette = img->palette;
+      while (p != pend) {
+        const char *cp = palette + 3 * *(unsigned char*)p++;
+        char c = *cp++;
+        putc(c, f);
+        c = *cp++; putc(c, f);
+        c = *cp; putc(c, f);
+      }
+    } else {
+      fwrite(p, 1, pend - p, f);
+    }
   }
   fflush(f);
-  if (ferror(f)) die("error writing pgm");
+  if (ferror(f)) die("error writing pnm");
   fclose(f);
+}
+
+/* img must be initialized (at least noalloc_image).
+ * Doesn't support all features of PNM (e.g. ASCII and comments).
+ */
+static void read_pnm_stream(FILE *f, Image *img) {
+  (void)f; (void)img;
+  die("!! not supported read_pnm_stream");
 }
 
 /* --- PNG */
@@ -350,6 +384,8 @@ static void* xzalloc(void *opaque, uInt items, uInt size) {
   (void)opaque;
   return calloc(items, size);
 }
+
+/* --- */
 
 /* Returns the payload size of the IDAT chunk.
  * flate_level: 0 is uncompressed, 1..9 is compressed, 9 is maximum compression
@@ -629,7 +665,7 @@ static void check_palette(const Image *img) {
 }
 
 /* img must be initialized (at least noalloc_image). */
-static void read_png(const char *filename, Image *img) {
+static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   uint32_t width, height, palette_size = 0;
   uint8_t bpc, color_type, filter;
   char right_and_byte = 0;
@@ -643,11 +679,9 @@ static void read_png(const char *filename, Image *img) {
   char predictor;
   uint32_t d_remaining = (uint32_t)-1, rlen = 0;
   int32_t left_delta_inv = 0;
-  FILE *f;
   z_stream zs;
   int zr = Z_OK;
   xbool_t do_one_more_inflate = 1;
-  if (!(f = fopen(filename, "rb"))) die("error reading png");
   if (33 != fread(buf, 1, 33, f)) die("png too short");
   /* https://tools.ietf.org/rfc/rfc2083.txt */
   if (0 != memcmp(buf, kPngHeader, 16)) die("bad signature in png");
@@ -701,7 +735,7 @@ static void read_png(const char *filename, Image *img) {
         if (color_type == CT_INDEXED_RGB) die("missing png palette");
         palette_size = 0;
        do_alloc_image:
-        alloc_image(img, width, height, bpc, color_type, palette_size);
+        alloc_image(img, width, height, bpc, color_type, palette_size, force_bpc8);
         left_delta_inv = bpc * img->cpp;
         right_and_byte = ((width & 7) * left_delta_inv) & 7;
         /* 0: 0xff, 1: 0x80, 2: 0xc0, 3: 0xe0, 4: 0xf0, 5: 0xf8, 6: 0xfc, 7: 0xfe. */
@@ -830,9 +864,17 @@ static void read_png(const char *filename, Image *img) {
     memset(dp, '\0', d_remaining);
   }
   if (dp) inflateEnd(&zs);
+  if (force_bpc8) convert_to_bpc(img, 8);
+  if (color_type == CT_INDEXED_RGB) check_palette(img);
+}
+
+static void read_png(const char *filename, Image *img) {
+  const xbool_t force_bpc8 = 0;
+  FILE *f;
+  if (!(f = fopen(filename, "rb"))) die("error reading png");
+  read_png_stream(f, img, force_bpc8);
   if (ferror(f)) die("error reading png");
   fclose(f);
-  if (color_type == CT_INDEXED_RGB) check_palette(img);
 }
 
 /* --- */
@@ -867,7 +909,7 @@ static xbool_t is_gray_ok(const Image *img) {
  *
  * Only works if img->bpc == 8.
  */
-static uint32_t get_color_count(const Image *img) {
+static uint16_t get_color_count(const Image *img) {
   const uint32_t size = img->rlen * img->height;
   const uint8_t color_type = img->color_type;
   uint32_t color_count = 0;
@@ -1500,13 +1542,90 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc) {
 
 /* --- */
 
+static void read_image(const char *filename, Image *img, xbool_t force_bpc8) {
+  char buf[4];
+  FILE *f;
+  if (!(f = fopen(filename, "rb"))) die("error reading image");
+  if (4 != fread(buf, 1, 4, f)) die("image signature too short");
+  if (fseek(f, 0, SEEK_SET) != 0) die("cannot seek back to image");
+  if (0 == memcmp(buf, kPngHeader, 4)) {
+    read_png_stream(f, img, force_bpc8);
+  } else if (buf[0] == 'P' && (buf[1] == '4' || buf[1] == '5' || buf[1] == '6')) {
+    /* We support only the subset of the PNM format. */
+    read_pnm_stream(f, img);
+    if (force_bpc8) convert_to_bpc(img, 8);
+  } else {
+    die("unknown input image format");
+  }
+  if (ferror(f)) die("error reading image");
+  fclose(f);
+}
+
+/* Changes the bpc and/or the color_type heuristically, in order to make the
+ * output of a subsequent write_png small.
+ *
+ * Only works if img->bpc == 8.
+ */
+static void optimize_for_png(Image *img, xbool_t is_extended,
+                             xbool_t force_gray) {
+  /* !! if rgb4 is the winner, also try rgb8 */
+  /* !! if rgb2 is the winner, also try indexed8 */
+  /* !! if rgb1 is the winner, also try indexed4 */
+  /* Here we follow the order by pdfsizeopt
+   * (-s Gray1:Indexed1:Gray2:Indexed2:Rgb1:Gray4:Indexed4:Rgb2:Gray8:Indexed8:Rgb4:Rgb8:stop)
+   */
+  const xbool_t is_gray_ok_ = is_gray_ok(img);
+  const uint8_t min_rgb_bpc = get_min_rgb_bpc(img);
+  const uint32_t color_count = get_color_count(img);
+  if (img->bpc != 8) die("ASSERT: optimize_for_png needs bpc=8");
+  if (force_gray && !is_gray_ok_) die("cannot convert to gray");
+  if (is_gray_ok_ && min_rgb_bpc == 1) {  /* Gray1 */
+   do_gray:
+    convert_to_gray(img);
+    convert_to_bpc(img, min_rgb_bpc);
+  } else if (color_count <= 2 && !force_gray) {  /* Indexed1 */
+    convert_to_indexed(img);
+    convert_to_bpc(img, 1);
+  } else if (is_gray_ok_ && min_rgb_bpc == 2) {  /* Gray2 */
+    goto do_gray;
+  } else if (color_count <= 4 && !force_gray) {  /* Indexed2 */
+    convert_to_indexed(img);
+    convert_to_bpc(img, 2);
+  } else if (min_rgb_bpc == 1 && !force_gray && is_extended) {  /* Rgb1 */
+   do_rgb:
+    convert_to_rgb(img);
+    convert_to_bpc(img, min_rgb_bpc);
+  } else if (is_gray_ok_ && min_rgb_bpc == 4) {  /* Gray4 */
+    goto do_gray;
+  } else if (color_count <= 16 && !force_gray) {  /* Indexed4 */
+    convert_to_indexed(img);
+    convert_to_bpc(img, 4);
+  } else if (min_rgb_bpc == 2 && !force_gray && is_extended) {  /* Rgb2 */
+    goto do_rgb;
+  } else if (is_gray_ok_ && min_rgb_bpc == 8) {  /* Gray8 */
+    goto do_gray;
+  } else if (color_count <= 256 && !force_gray) {  /* Indexed8 */
+    convert_to_indexed(img);
+  } else if (min_rgb_bpc == 4 && !force_gray && is_extended) {  /* Rgb4 */
+    goto do_rgb;
+  } else if (min_rgb_bpc == 8 && !force_gray) {  /* Rgb8 */
+    goto do_rgb;
+  } else {
+    die("ASSERT: optimize_for_png found no solution");
+  }
+}
+
+/* --- */
+
 static void init_image_chess(Image *img) {
+  const xbool_t do_alloc_bpc8 = 0;
   enum { kWidth = 91, kHeight = 84 };  /* For -ansi -pedantic. */
   const uint32_t width = 91, height = 84;
   static const char palette[] = "\0\0\0\xff\xff\xff";
   uint32_t x, y;
   char (*img_data)[kHeight][kWidth];
-  alloc_image(img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1);
+  alloc_image(img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1,
+              do_alloc_bpc8);
   img_data = (char(*)[kHeight][kWidth])img->data;
   memcpy(img->palette, palette, sizeof(palette) - 1);
   for (y = 0; y < height; ++y) {
@@ -1519,12 +1638,14 @@ static void init_image_chess(Image *img) {
 }
 
 static void init_image_squares(Image *img) {
+  const xbool_t do_alloc_bpc8 = 0;
   enum { kWidth = 91, kHeight = 84 };  /* For -ansi -pedantic. */
   const uint32_t width = 91, height = 84;
   static const char palette[] = "\0\0\0\xff\0\0\0\xff\0\xff\xff\0\1\2\3";
   uint32_t x, y;
   char (*img_data)[kHeight][kWidth];
-  alloc_image(img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1);
+  alloc_image(img, width, height, 8, CT_INDEXED_RGB, sizeof(palette) - 1,
+              do_alloc_bpc8);
   img_data = (char(*)[kHeight][kWidth])img->data;
   memcpy(img->palette, palette, sizeof(palette) - 1);
   for (y = 0; y < height; ++y) {
@@ -1535,13 +1656,13 @@ static void init_image_squares(Image *img) {
   }
 }
 
-int main(int argc, char **argv) {
+/* TODO(pts): Compare the output with the expected output. */
+static void regression_test() {
   Image img;
   const uint8_t predictor_mode = PM_PNGAUTO;
   const xbool_t is_extended = 0;
   const uint8_t flate_level = 0;
 
-  (void)argc; (void)argv;
   init_image_chess(&img);
   /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
   fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
@@ -1566,6 +1687,7 @@ int main(int argc, char **argv) {
   img.color_type = CT_GRAY;  /* This only works if bpc=1. */
   /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g1.png", &img, is_extended, PM_NONE, 9);
+  write_pnm("chess2.pbm", &img);
   convert_to_bpc(&img, 2);
   /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g2.png", &img, is_extended, PM_NONE, 9);
@@ -1575,6 +1697,7 @@ int main(int argc, char **argv) {
   convert_to_bpc(&img, 8);
   /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g8.png", &img, is_extended, PM_NONE, 9);
+  write_pnm("chess2.pgm", &img);
   convert_to_rgb(&img);
   /* color_type=2 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
   fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
@@ -1657,11 +1780,98 @@ int main(int argc, char **argv) {
   convert_to_bpc(&img, 4);
   write_png("square2ri4.png", &img, is_extended, PM_PNGAUTO, 9);
 
+  /* !! Add a smaller version of beach.png to the repo. */
   read_png("beach.png", &img);
   /* color_type=2 bpc=8 is_gray_ok=0 min_bpc=8 min_rgb_bpc=8 color_count=257 */
   fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("beach3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
+}
 
+/* --- */
+
+static xbool_t is_endswith(const char *p, const char *suffix) {
+  const size_t plen = strlen(p);
+  const size_t suffixlen = strlen(suffix);
+  return plen >= suffixlen && 0 == strcmp(p + (plen - suffixlen), suffix);
+}
+
+int main(int argc, char **argv) {
+  char **argi;
+  const char *inputfn, *outputfn;
+  const xbool_t force_bpc8 = 1;
+  /* !! check sam2p predictor defaults and choices */
+  uint8_t predictor_mode = PM_SMART;  /* Also the default of sam2p. */
+  xbool_t is_extended = 0;  /* Allow extended (nonstandard) PNG output? */
+  xbool_t force_gray = 0;
+  const uint8_t flate_level = 9;  /* !! allow override; sam2p has -c:zip:1:9 */
+  Image img;
+
+  (void)argc;
+  for (argi = argv + 1; *argi;) {
+    char *arg = *argi++;
+    if (arg[0] != '-' || arg[1] == '\0') {
+      --argi;
+      break;
+    } else if (0 == strcmp(arg, "--")) {
+      break;
+    } else if (0 == strcmp(arg, "-j:quiet")) {
+      /* Ignore this flag by sam2p. */
+    } else if (0 == strcmp(arg, "-j:ext")) {  /* Not sam2p. */
+      is_extended = 1;
+    } else if (0 == strcmp(arg, "-c:zip:none")) {  /* Not sam2p. */
+      predictor_mode = PM_NONE;
+    } else if (0 == strcmp(arg, "-c:zip:10")) {
+      predictor_mode = PM_PNGNONE;
+    } else if (0 == strcmp(arg, "-c:zip:15")) {
+      predictor_mode = PM_PNGAUTO;
+    } else if (0 == strcmp(arg, "-c:zip:25") ||
+               0 == strcmp(arg, "-c:zip")) {
+      predictor_mode = PM_SMART;
+    } else if (0 == strcmp(arg, "-s:grays")) {
+      /* !! add better compatibility? how should pdfsizeopt detect wheter sam2p or imgdataopt is used?
+       * pdfsizeopt calls with: -s Gray1:Indexed1:Gray2:Indexed2:Rgb1:Gray4:Indexed4:Rgb2:Gray8:Indexed8:Rgb4:Rgb8:stop
+       * pdfsizeopt calls with: -s Gray1:Gray2:Gray4:Gray8:stop
+       */
+      force_gray = 1;
+    } else if (0 == strcmp(arg, "--regression-test")) {
+      regression_test();  /* !! Add -DNO_REGRESSION_TEST. */
+      return 0;
+    } else {
+    }
+  }
+  /* !! add help */
+  if (!(inputfn = *argi++)) die("missing input filename");
+  if (!(outputfn = *argi++)) die("missing output filename");
+  if (*argi) die("too many command-line arguments");
+
+  noalloc_image(&img);
+  read_image(inputfn, &img, force_bpc8);
+  /* TODO(pts): Use case insensitive comparison for extensions. */
+  if (is_endswith(outputfn, ".png")) {
+    optimize_for_png(&img, is_extended, force_gray);
+    write_png(outputfn, &img, is_extended, predictor_mode, flate_level);
+  } else if (is_endswith(outputfn, ".ppm")) {
+   write_ppm:
+    if (force_gray) die("cannot save gray as ppm");
+    convert_to_rgb(&img);
+    write_pnm(outputfn, &img);
+  } else if (is_endswith(outputfn, ".pgm")) {
+   write_pgm:
+    convert_to_gray(&img);
+    write_pnm(outputfn, &img);
+  } else if (is_endswith(outputfn, ".pbm")) {
+   write_pbm:
+    convert_to_gray(&img);
+    convert_to_bpc(&img, 1);
+    write_pnm(outputfn, &img);
+  } else if (is_endswith(outputfn, ".pnm")) {
+    if (!is_gray_ok(&img)) goto write_ppm;
+    if (get_min_rgb_bpc(&img) > 1) goto write_pgm;
+    goto write_pbm;
+  } else {
+    die("bad output format");
+  }
+  dealloc_image(&img);
   return 0;
 }
