@@ -21,7 +21,7 @@
 
 #include "zlib.h"
 
-#ifdef STDC
+#if defined(STDC) && !defined(__TINYC__)
 #  if !(defined(_WIN32_WCE) && defined(_MSC_VER))
 #    include <stddef.h>
 #  endif

@@ -1,5 +1,5 @@
 CC = gcc  # g++, clang and clang++ also works
-TCC = tcc  # Tiny C Compiler, https://bellard.org/tcc/
+TCC = tcc  # Tiny C Compiler, https://bellard.org/tcc/ ; also try TCC=pts-tcc at http://ptspts.blogspot.com/2009/11/tiny-self-contained-c-compiler-using.html
 CC_MINGW = i686-w64-mingw32-gcc
 ZLIB_HEADERS = zlib_src/inffast.h zlib_src/crc32.h zlib_src/inflate.h zlib_src/trees.h zlib_src/inffixed.h zlib_src/zutil.h zlib_src/deflate.h zlib_src/zlib.h zlib_src/zconf.h zlib_src/inftrees.h
 ZLIB_SRCS = zlib_src/deflate.c zlib_src/trees.c zlib_src/adler32.c zlib_src/inftrees.c zlib_src/zall.c zlib_src/inflate.c zlib_src/crc32.c zlib_src/inffast.c zlib_src/zutil.c
@@ -35,10 +35,12 @@ imgdataopt.darwinc64: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 	$(DOCKER_CROSSBUILD) /usr/osxcross/bin/o64-clang -mmacosx-version-min=10.5 -Wl,-dead_strip -ffunction-sections -fdata-sections -lSystem -lcrt1.10.5.o -nostdlib -Izlib_src -DNO_VIZ -DNO_COMBINE64 -ansi -pedantic -O2 -W -Wall -Wextra -Werror $(CFLAGS) -o imgdataopt.darwinc64 imgdataopt.c zlib_src/zall.c
 	$(DOCKER_CROSSBUILD) /usr/osxcross/bin/x86_64-apple-darwin14-strip imgdataopt.darwinc64
 
-# TODO(pts): Compile zlib with tcc as well.
 imgdataopt.tcclz: imgdataopt.c
-	$(TCC) -m32 -c -W -Wall -Wextra -Werror -o imgdataopt.tcc.o imgdataopt.c
-	gcc -m32 -o imgdataopt.tcclz imgdataopt.tcc.o -lz
+	$(TCC) -m32 -c -W -Wall -Wextra -Werror -o imgdataopt.tcclz.o imgdataopt.c
+	gcc -m32 -s -o imgdataopt.tcclz imgdataopt.tcclz.o -lz
+imgdataopt.tcc: imgdataopt.c $(ZLIB_SRCS)
+	$(TCC) -m32 -Izlib_src -DNO_VIZ -W -Wall -Wextra -Werror -o imgdataopt.tcc imgdataopt.c zlib_src/zall.c
+	strip imgdataopt.tcc
 
 clean:
 	rm -f core imgdataopt imgdataopt.yes imgdataopt.lz imgdataopt.tcclz imgdataopt.exe imgdataopt.xstatic imgdataopt.xstatico3 imgdataopt.darwinc32 imgdataopt.darwinc64 *.o zlib_src/*.o

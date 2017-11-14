@@ -31,7 +31,10 @@
 #define local static
 
 /* Find a four-byte integer type for crc32_little() and crc32_big(). */
-#ifndef NOBYFOUR
+#ifdef NOBYFOUR
+# ifdef __TINYC__
+   typedef unsigned int u4;
+# else
 #  ifdef STDC           /* need ANSI C limits.h to determine sizes */
 #    include <limits.h>
 #    define BYFOUR
@@ -49,6 +52,7 @@
 #      endif
 #    endif
 #  endif /* STDC */
+# endif
 #endif /* !NOBYFOUR */
 
 /* Definitions for doing the crc four data bytes at a time. */

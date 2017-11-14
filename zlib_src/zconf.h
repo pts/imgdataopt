@@ -360,7 +360,7 @@ typedef uLong FAR uLongf;
 #  define Z_HAVE_UNISTD_H
 #endif
 
-#ifdef STDC
+#if defined(STDC) && !defined(__TINYC__)
 #  include <sys/types.h>    /* for off_t */
 #endif
 
@@ -374,7 +374,7 @@ typedef uLong FAR uLongf;
 #  undef _LARGEFILE64_SOURCE
 #endif
 
-#if defined(Z_HAVE_UNISTD_H) || defined(_LARGEFILE64_SOURCE)
+#if (defined(Z_HAVE_UNISTD_H) || defined(_LARGEFILE64_SOURCE)) && !defined(__TINYC__)
 #  include <unistd.h>       /* for SEEK_* and off_t */
 #  ifdef VMS
 #    include <unixio.h>     /* for off_t */
