@@ -702,12 +702,12 @@ static void check_palette(const Image *img) {
       }
     } else if (bpc == 4) {
       while (p != pend) {
-        const uint8_t v = *p++;
+        const unsigned char v = *p++;
         if ((v >> 4) > max_color_idx || (v & 15) > max_color_idx) goto too_much;
       }
     } else if (bpc == 2) {
       while (p != pend) {
-        const uint8_t v = *p++;
+        const unsigned char v = *p++;
         if ((v >> 6) > max_color_idx || ((v >> 4) & 3) > max_color_idx ||
             ((v >> 2) & 3) > max_color_idx || (v & 3) > max_color_idx
            ) goto too_much;
