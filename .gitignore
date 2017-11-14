@@ -3,3 +3,9 @@ a.out
 DEADJOE
 *.o
 imgdataopt
+imgdataopt.lz
+imgdataopt.exe
+imgdataopt.xstatic
+imgdataopt.darwinc32
+imgdataopt.darwinc64
+

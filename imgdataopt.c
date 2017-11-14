@@ -18,6 +18,16 @@
 /* !! compile the final version with g++ */
 /* !! check: ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
 /* !! check: nonvalidating PNG parser: properly ignore checksums */
+/* !! why is the executable size different?
+      $ xstatic gcc-4.8 -DNO_VIZ -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -Izlib_src zlib_src/zall.c
+      -rwxr-xr-x 1 pts pts 94348 Nov 14 12:25 imgdataopt
+      $ xstatic g++-4.8 -DNO_VIZ -ansi -pedantic -s -O2 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -Izlib_src zlib_src/zall.c
+      $ ls -l imgdataopt
+      -rwxr-xr-x 1 pts pts 94940 Nov 14 12:25 imgdataopt
+      FYI -O3 makes it larger
+      $ xstatic gcc-4.8 -DNO_VIZ -ansi -pedantic -s -O3 -W -Wall -Wextra -Werror -o imgdataopt imgdataopt.c -Izlib_src zlib_src/zall.c
+      -rwxr-xr-x 1 pts eng 110412 Nov 14 12:27 imgdataopt
+*/
 
 #ifdef __TINYC__   /* tcc: https://bellard.org/tcc/ */
 #define USE_GCC_ALTERNATE_KEYWORDS 1
