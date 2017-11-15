@@ -1870,11 +1870,10 @@ int main(int argc, char **argv) {
   char **argi;
   const char *inputfn, *outputfn;
   const xbool_t force_bpc8 = 1;
-  /* !! check sam2p predictor defaults and choices */
   uint8_t predictor_mode = PM_SMART;  /* Also the default of sam2p. */
   xbool_t is_extended = 0;  /* Allow extended (nonstandard) PNG output? */
   xbool_t force_gray = 0;
-  const uint8_t flate_level = 9;  /* !! allow override; sam2p has -c:zip:1:9 */
+  uint8_t flate_level = 9;  /* !! allow override; The default of sam2p is 5. */
   Image img;
 
   (void)argc;
@@ -1889,15 +1888,17 @@ int main(int argc, char **argv) {
       /* Ignore this flag by sam2p. */
     } else if (0 == strcmp(arg, "-j:ext")) {  /* Not sam2p. */
       is_extended = 1;
-    } else if (0 == strcmp(arg, "-c:zip:none")) {  /* Not sam2p. */
+    } else if (0 == strcmp(arg, "-c:zip:1:9")) {
       predictor_mode = PM_NONE;
-    } else if (0 == strcmp(arg, "-c:zip:10")) {
+    } else if (0 == strcmp(arg, "-c:zip:10:9")) {
       predictor_mode = PM_PNGNONE;
-    } else if (0 == strcmp(arg, "-c:zip:15")) {
+    } else if (0 == strcmp(arg, "-c:zip:15:9")) {
       predictor_mode = PM_PNGAUTO;
-    } else if (0 == strcmp(arg, "-c:zip:25") ||
-               0 == strcmp(arg, "-c:zip")) {
+    } else if (0 == strcmp(arg, "-c:zip:25:9")) {
       predictor_mode = PM_SMART;
+    } else if (0 == strcmp(arg, "-c:zip")) {
+      predictor_mode = PM_NONE;
+      flate_level = 5;  /* sam2p default. Not recommended. */
     } else if (0 == strcmp(arg, "-s:grays")) {
       /* !! add better compatibility? how should pdfsizeopt detect wheter sam2p or imgdataopt is used?
        * pdfsizeopt calls with: -s Gray1:Indexed1:Gray2:Indexed2:Rgb1:Gray4:Indexed4:Rgb2:Gray8:Indexed8:Rgb4:Rgb8:stop

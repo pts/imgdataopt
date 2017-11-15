@@ -23,9 +23,9 @@ function do_png_test() {
   #perl -pi -0777 -e 's@\A(P\d\n)#.*\n@$1@' "$TMP_PNM"
   cmp "$EXPECTED_PNM" "$TMP_PNM"
 
-  # -c:zip:15 makes a difference, it makes imgdataopt choose per-row predictors
-  # differently.
-  $PREFIX "$IMGDATAOPT" -j:quiet -c:zip:15 -- "$INPUT_PNG" "$TMP_PNG"
+  # -c:zip:15:9 makes a difference, it makes imgdataopt choose per-row
+  # predictors differently.
+  $PREFIX "$IMGDATAOPT" -j:quiet -c:zip:15:9 -- "$INPUT_PNG" "$TMP_PNG"
   $PREFIX "$IMGDATAOPT" -j:quiet -- "$TMP_PNG" "$TMP_PNM"
   #perl -pi -0777 -e 's@\A(P\d\n)#.*\n@$1@' "$TMP_PNM"
   cmp "$EXPECTED_PNM" "$TMP_PNM"
