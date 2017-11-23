@@ -81,6 +81,12 @@ Features and comparison
   reading, e.g. it is not able to read interlaced PNG, it ignores PNG gamma
   correction and transparency, and it is not able to read ASCII PNM.
 
+* imgdataopt doesn't support transperency or alpha channel (e.g. RGBA): it
+  can read and write only images without an alpha channel, and all pixels
+  are assumed to have an implicit alpha value of 255 (fully opaque). sam2p
+  supports images with transparency, i.e. the pixel alpha values of 0 (fully
+  transparent) and 255 (fully opaque), but no arbitrary alpha values.
+
 * imgdataopt has some tests (see the png_test directory) for various bit
   depths and predictors.
 
