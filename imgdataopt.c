@@ -179,8 +179,9 @@ static void *xmalloc(size_t size) {
 typedef struct Image {
   uint32_t width;
   uint32_t height;
-  /* Computed from width, bpc and cpp.
-   * It's guaranteed that rlen * height first to an uint32_t.
+  /* Number of bytes needed to store each row.
+   * Computed from width, bpc and cpp.
+   * It's guaranteed that rlen * height fits to an uint32_t.
    */
   uint32_t rlen;
   /* data[:alloced] is available as a buffer.
@@ -459,7 +460,7 @@ static void* xzalloc(void *opaque, uInt items, uInt size) {
  */
 static uint32_t write_png_img_data(
     FILE *f, const char *img_data, register uint32_t rlen, uint32_t height,
-    uint8_t predictor_mode, uint8_t bpc_cpp, uint8_t flate_level) {
+    uint8_t predictor_mode, uint8_t bpc, uint8_t cpp, uint8_t flate_level) {
   const uint32_t rlen1 = rlen + 1;
   char obuf[8192];
   uint32_t crc32v = 900662814UL;  /* zlib.crc32("IDAT"). */
@@ -482,14 +483,70 @@ static uint32_t write_png_img_data(
     /* Z_FINISH below will do all the compression. */
   } else if (predictor_mode == PM_TIFF2) {
     /* Implemented in TIFFPredictor2::vi_write in encoder.cpp in sam2p. */
-    die("TIFF2 predictor not supported");
+    const uint8_t bpx = (cpp - 1) * bpc;
+    char *tmp = (char*)xmalloc(rlen);
+    for (; height > 0; img_data += rlen, --height) {
+      uint32_t h = 0;
+      char *op = tmp;
+      const char *p = img_data, *pend = p + rlen;
+      unsigned char d, o;
+      if (bpc == 1) {
+        while (p != pend) {
+          const unsigned char i = *p++;
+          d = (i >> 7); o  = ((d - (h >> bpx)) & 1) << 7; h = (h << 1) | d;
+          d = (i >> 6); o |= ((d - (h >> bpx)) & 1) << 6; h = (h << 1) | (d & 1);
+          d = (i >> 5); o |= ((d - (h >> bpx)) & 1) << 5; h = (h << 1) | (d & 1);
+          d = (i >> 4); o |= ((d - (h >> bpx)) & 1) << 4; h = (h << 1) | (d & 1);
+          d = (i >> 3); o |= ((d - (h >> bpx)) & 1) << 3; h = (h << 1) | (d & 1);
+          d = (i >> 2); o |= ((d - (h >> bpx)) & 1) << 2; h = (h << 1) | (d & 1);
+          d = (i >> 1); o |= ((d - (h >> bpx)) & 1) << 1; h = (h << 1) | (d & 1);
+          d = (i     ); o |= ((d - (h >> bpx)) & 1)     ; h = (h << 1) | (d & 1);
+          *op++ = o;
+        }
+      } else if (bpc == 2) {
+        while (p != pend) {
+          const unsigned char i = *p++;
+          d = (i >> 6); o  = ((d - (h >> bpx)) & 3) << 6; h = (h << 2) | d;
+          d = (i >> 4); o |= ((d - (h >> bpx)) & 3) << 4; h = (h << 2) | (d & 3);
+          d = (i >> 2); o |= ((d - (h >> bpx)) & 3) << 2; h = (h << 2) | (d & 3);
+          d = (i     ); o |= ((d - (h >> bpx)) & 3)     ; h = (h << 2) | (d & 3);
+          *op++ = o;
+        }
+      } else if (bpc == 4) {
+        while (p != pend) {
+          const unsigned char i = *p++;
+          d = (i >> 4); o  = ((d - (h >> bpx)) & 15) << 4; h = (h << 4) | d;
+          d = (i     ); o |= ((d - (h >> bpx)) & 15)     ; h = (h << 4) | (d & 15);
+          *op++ = o;
+        }
+      } else if (bpc == 8) {
+        while (p != pend) {
+          const unsigned char i = *p++;
+          *op++ = ((i - ((h  >> bpx)))/* & 255*/); h = (h << 8) | i;
+        }
+      } else {
+        die("ASSERT: bad bpc for writing PM_TIFF2");
+      }
+      zs.next_in = (Bytef*)tmp;
+      zs.avail_in = rlen;
+      do {
+        zs.next_out = (Bytef*)obuf;
+        zs.avail_out = sizeof(obuf);
+        if (deflate(&zs, Z_NO_FLUSH) != Z_OK) die("deflate failed");
+        zoutsize = zs.next_out - (Bytef*)obuf;
+        crc32v = crc32(crc32v, (const Bytef*)obuf, zoutsize);
+        fwrite(obuf, 1, zoutsize, f);
+      } while (zs.avail_out == 0);
+      if (zs.avail_in != 0) die("deflate has not processed all input");
+    }
+    free(tmp);
   } else if (predictor_mode == PM_PNGAUTO) {
     /* 1 for the predictor identifier in the row, 6 for the 5 predictors + copy
      * of the previous row.
      */
     char *tmp = (char*)xmalloc(add_check(multiply_check(rlen, 6), 1));
-    const int32_t left_delta = -((bpc_cpp + 7) >> 3);
-    /* Since 1 <= bpc_cpp <= 24, so -3 <= left_delta <= -1. */
+    const int32_t left_delta = -((bpc * cpp + 7) >> 3);
+    /* Since 1 <= bpc * cpp <= 24, so -3 <= left_delta <= -1. */
     memset(tmp + 1 + rlen * 5, '\0', rlen);  /* Previous row. */
     for (; height > 0; img_data += rlen, --height) {
       char *p, *pend, *best_predicted;
@@ -676,7 +733,7 @@ static void write_png(const char *filename, const Image *img,
   }
   idat_size = write_png_img_data(
       f, img->data, img->rlen, img->height, predictor_mode,
-      img->bpc * img->cpp, flate_level);
+      img->bpc, img->cpp, flate_level);
   write_png_end(f);
   if (fseek(f, idat_size_ofs, SEEK_SET)) die("error seeking to idat_size_ofs");
   put_u32be(buf, idat_size);
@@ -733,7 +790,7 @@ static void check_palette(const Image *img) {
 /* img must be initialized (at least noalloc_image). */
 static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   uint32_t width, height, palette_size = 0;
-  uint8_t bpc, color_type, filter;
+  uint8_t bpc, bpx = 0, color_type, filter;
   char right_and_byte = 0;
   /* Must be large enough for the PNG header (33 bytes), for the palette (3
    * * 256 bytes), and must be fast enough for inflate, and must be at least
@@ -770,7 +827,6 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   filter = *p++;
   /* PNG supports filter == 0 only; 1 and 2 are imgdataopt extensions. */
   if (filter != PNG_FILTER_DEFAULT && filter != PM_NONE && filter != PM_TIFF2) die("bad png filter");
-  if (filter == PM_TIFF2) die("TIFF2 predictor not supported");
   if (*p++ != PNG_INTERLACE_NONE) die("not supported png interlace");
   for (;;) {
     uint32_t chunk_size;
@@ -807,6 +863,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
         palette_size = 0;
        do_alloc_image:
         alloc_image(img, width, height, bpc, color_type, palette_size, force_bpc8);
+        bpx = (img->cpp - 1) * bpc;
         left_delta_inv = bpc * img->cpp;
         right_and_byte = ((width & 7) * left_delta_inv) & 7;
         /* 0: 0xff, 1: 0x80, 2: 0xc0, 3: 0xe0, 4: 0xf0, 5: 0xf8, 6: 0xfc, 7: 0xfe. */
@@ -835,9 +892,12 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
             if (filter == PNG_FILTER_DEFAULT) {
               zs.next_out = (Bytef*)&predictor;
               zs.avail_out = 1;
-            } else {
+            } else if (filter == PM_NONE) {
               zs.next_out = (Bytef*)dp;
               zs.avail_out = d_remaining;  /* TODO(pts): Check for overflow. */
+            } else if (filter == PM_TIFF2) {
+              zs.next_out = (Bytef*)dp;
+              zs.avail_out = rlen;
             }
           }
           /* There was an error or EOF before, we can't inflate anymore. */
@@ -864,9 +924,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
               if ((unsigned char)predictor > 4) die("bad png predictor");
               zs.next_out = (Bytef*)dp;
               zs.avail_out = rlen;
-            } else if (filter != PNG_FILTER_DEFAULT) {  /* PM_NONE */
-              d_remaining = 0;
-            } else {
+            } else if (filter == PNG_FILTER_DEFAULT) {
               /* Now we've predictor and dp[:rlen] as the current row ready. */
               unsigned char *dpleft = dp + left_delta_inv;
               unsigned char *dpend = dp + rlen;
@@ -907,6 +965,53 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
               d_remaining -= rlen;
               zs.next_out = (Bytef*)&predictor;
               zs.avail_out = d_remaining != 0;
+            } else if (filter == PM_NONE) {
+              d_remaining = 0;
+            } else if (filter == PM_TIFF2) {
+              /* Unfilter (predictor) a single row. */
+              uint32_t h = 0;
+              unsigned char *dpend = dp + rlen;
+              unsigned char o;
+              if (bpc == 1) {
+                while (dp != dpend) {
+                  const unsigned char i = *dp;
+                  o  = (((i >> 7) + (h >> bpx)) & 1) << 7; h = (h << 1) | (o >> 7);
+                  o |= (((i >> 6) + (h >> bpx)) & 1) << 6; h = (h << 1) | ((o >> 6) & 1);
+                  o |= (((i >> 5) + (h >> bpx)) & 1) << 5; h = (h << 1) | ((o >> 5) & 1);
+                  o |= (((i >> 4) + (h >> bpx)) & 1) << 4; h = (h << 1) | ((o >> 4) & 1);
+                  o |= (((i >> 3) + (h >> bpx)) & 1) << 3; h = (h << 1) | ((o >> 3) & 1);
+                  o |= (((i >> 2) + (h >> bpx)) & 1) << 2; h = (h << 1) | ((o >> 2) & 1);
+                  o |= (((i >> 1) + (h >> bpx)) & 1) << 1; h = (h << 1) | ((o >> 1) & 1);
+                  o |= (((i     ) + (h >> bpx)) & 1)     ; h = (h << 1) | (o & 1);
+                  *dp++ = o;
+                }
+              } else if (bpc == 2) {
+                while (dp != dpend) {
+                  const unsigned char i = *dp;
+                  o  = (((i >> 6) + (h >> bpx)) & 3) << 6; h = (h << 2) | (o >> 6);
+                  o |= (((i >> 4) + (h >> bpx)) & 3) << 4; h = (h << 2) | ((o >> 4) & 3);
+                  o |= (((i >> 2) + (h >> bpx)) & 3) << 2; h = (h << 2) | ((o >> 2) & 3);
+                  o |= (((i     ) + (h >> bpx)) & 3)     ; h = (h << 2) | (o & 3);
+                  *dp++ = o;
+                }
+              } else if (bpc == 4) {
+                while (dp != dpend) {
+                  const unsigned char i = *dp;
+                  o  = (((i >> 4) + (h >> bpx)) & 15) << 4; h = (h << 4) | (o >> 4);
+                  o |= (((i     ) + (h >> bpx)) & 15)     ; h = (h << 4) | (o & 15);
+                  *dp++ = o;
+                }
+              } else if (bpc == 8) {
+                while (dp != dpend) {
+                  const unsigned char i = *dp++ += h >> bpx;
+                  h = (h << 8) | i;
+                }
+              } else {
+                die("ASSERT: bad bpc for writing PM_TIFF2");
+              }
+              d_remaining -= rlen;
+              zs.next_out = (Bytef*)dp;
+              zs.avail_out = d_remaining != 0 ? rlen : 0;
             }
           }
         }
@@ -1838,6 +1943,7 @@ static void regression_test() {
   write_png("square2r48.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 2);
   write_png("square2r2.png", &img, 1, PM_PNGAUTO, 9);
+  write_png("square2r2t.png", &img, 1, PM_TIFF2, 9);
   convert_to_bpc(&img, 8);
   write_png("square2r28.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 1);
@@ -1852,6 +1958,14 @@ static void regression_test() {
   write_png("square2ri2.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 4);
   write_png("square2ri4.png", &img, is_extended, PM_PNGAUTO, 9);
+  write_png("square2ri4t.png", &img, 1, PM_TIFF2, 9);
+
+  read_png("square2r2t.png", &img);
+  convert_to_bpc(&img, 8);
+  write_png("square2r2tt.png", &img, is_extended, PM_PNGAUTO, 9);
+
+  read_png("square2ri4t.png", &img);
+  write_png("square2ri4tt.png", &img, is_extended, PM_PNGAUTO, 9);
 
   /* !! Add a smaller version of beach.png to the repo. */
   read_png("beach.png", &img);
