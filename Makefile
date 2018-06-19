@@ -5,7 +5,7 @@ ZLIB_HEADERS = zlib_src/inffast.h zlib_src/crc32.h zlib_src/inflate.h zlib_src/t
 ZLIB_SRCS = zlib_src/deflate.c zlib_src/trees.c zlib_src/adler32.c zlib_src/inftrees.c zlib_src/zall.c zlib_src/inflate.c zlib_src/crc32.c zlib_src/inffast.c zlib_src/zutil.c
 DOCKER_CROSSBUILD = docker run -v "$$PWD:/workdir" -u "$$(id -u):$$(id -g)" --rm -it multiarch/crossbuild 
 
-WFLAGS = -W -Wall -Wextra -Werror=implicit-function-declaration
+WFLAGS = -W -Wall -Wextra -Werror=implicit-function-declaration -Wno-array-bounds
 
 .PHONY: all clean
 all: imgdataopt
