@@ -17,6 +17,7 @@
  * Also works with tcc 0.9.25 (and pts-tcc 0.9.25): tcc -c -O2 -W -Wall -Wextra -Werror imgdataopt.c && gcc -m32 -o imgdataopt imgdataopt.o -lz
  */
 
+/* !! use miniz (https://github.com/richgel999/miniz/blob/master/miniz.h) instead of zlib, how much smaller is it, how much faster is it? */
 /* !! double check the 300000 constant in the memory usage */
 /* !! compile the final version with g++ */
 /* !! check: ignore: Extra compressed data https://github.com/pts/pdfsizeopt/issues/51 */
