@@ -624,7 +624,7 @@ static uint32_t write_png_img_data(
           fwrite(obuf, 1, zoutsize, f);
         } while (zs.avail_out == 0);
         if (zs.avail_in != 0) die("deflate has not processed all input");
-        if (predictor != PNG_PR_NONE) break;
+        if (predictor != PNG_PR_NONE || rlen == 0) break;
         ++predictor;
         zs.next_in = (Bytef*)img_data;
         zs.avail_in = rlen;  /* TODO(pts): Check for overflow. */
@@ -813,9 +813,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   }
   dealloc_image(img);
   width = get_u32be(buf + 16);
-  if ((int32_t)width <= 0) die("bad png width");
   height = get_u32be(buf + 20);
-  if ((int32_t)height <= 0) die("bad png height");
   p = buf + 24;
   bpc = *p++;
   if (bpc == 16) die("not supported png bpc");
@@ -1023,7 +1021,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
       if (is_iend) break;
     }
   }
-  if (!img->data) die("missing png image data");
+  if (!img->data && width > 0 && height > 0) die("missing png image data");
   if (zr == Z_DATA_ERROR) {
     fprintf(stderr, "warning: bad png image data or bad adler32\n");
   }
