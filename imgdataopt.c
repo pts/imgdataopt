@@ -204,7 +204,6 @@ typedef struct Image {
   uint8_t cpp;
 } Image;
 
-static void noalloc_image(Image *img) ATTRIBUTE_USED;  /* !! remove if unused */
 static void noalloc_image(Image *img) {
   img->data = img->palette = NULL;
 }
@@ -251,7 +250,7 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc);
 
 /* --- PNM */
 
-/* !! Add -DNO_PNM option to remove PNM functionality. */
+/* !! Add -DNO_PNM option to remove PNM functionality and save space. */
 
 static void write_pnm(const char *filename, const Image *img) {
   const uint32_t width = img->width;
@@ -1988,7 +1987,7 @@ int main(int argc, char **argv) {
   uint8_t predictor_mode = PM_SMART;  /* Also the default of sam2p. */
   xbool_t is_extended = 0;  /* Allow extended (nonstandard) PNG output? */
   xbool_t force_gray = 0;
-  uint8_t flate_level = 9;  /* !! allow override; The default of sam2p is 5. */
+  uint8_t flate_level = 9;  /* !! allow override in -c:zip:PREDICTOR:LEVEL; The default of sam2p is 5. */
   Image img;
 
   (void)argc;
@@ -2022,12 +2021,12 @@ int main(int argc, char **argv) {
        */
       force_gray = 1;
     } else if (0 == strcmp(arg, "--regression-test")) {
-      regression_test();  /* !! Add -DNO_REGRESSION_TEST. */
+      regression_test();  /* !! Add -DNO_REGRESSION_TEST to save space. */
       return 0;
     } else {
     }
   }
-  /* !! add help */
+  /* !! add --help */
   if (!(inputfn = *argi++)) die("missing input filename");
   if (!(outputfn = *argi++)) die("missing output filename");
   if (*argi) die("too many command-line arguments");
