@@ -251,8 +251,8 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc);
 /* --- PNM */
 
 /* !! Add -DNO_PMTIFF option to omit PM_TIFF2 support for reading and writing PNG and save space. */
-/* !! Add -DNO_PNM option to option PNM functionality and save space. */
 
+#if !NO_PNM
 static void write_pnm(const char *filename, const Image *img) {
   const uint32_t width = img->width;
   uint32_t height = img->height;
@@ -372,6 +372,7 @@ static void read_pnm_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   }
   if (force_bpc8) convert_to_bpc(img, 8);
 }
+#endif
 
 /* --- PNG */
 
@@ -1732,9 +1733,11 @@ static void read_image(const char *filename, Image *img, xbool_t force_bpc8) {
   if (fseek(f, 0, SEEK_SET) != 0) die("cannot seek back to image");
   if (0 == memcmp(buf, kPngHeader, 4)) {
     read_png_stream(f, img, force_bpc8);
+#if !NO_PNM
   } else if (buf[0] == 'P' && (buf[1] == '4' || buf[1] == '5' || buf[1] == '6')) {
     /* We support only the subset of the PNM format. */
     read_pnm_stream(f, img, force_bpc8);
+#endif
   } else {
     die("unknown input image format");
   }
@@ -2080,6 +2083,7 @@ int main(int argc, char **argv) {
       (do_save_pdf_as_png && is_endswith(outputfn, ".pdf"))) {
     optimize_for_png(&img, is_extended, force_gray);
     write_png(outputfn, &img, is_extended, predictor_mode, flate_level);
+#if !NO_PNM
   } else if (is_endswith(outputfn, ".ppm")) {
    write_ppm:
     if (force_gray) die("cannot save gray as ppm");
@@ -2098,6 +2102,7 @@ int main(int argc, char **argv) {
     if (!is_gray_ok(&img)) goto write_ppm;
     if (get_min_rgb_bpc(&img) > 1) goto write_pgm;
     goto write_pbm;
+#endif
   } else {
     die("bad output format");
   }
