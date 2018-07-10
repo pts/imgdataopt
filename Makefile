@@ -22,7 +22,10 @@ imgdataopt.lz: imgdataopt.c
 	$(CC) -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o imgdataopt.lz imgdataopt.c -lz
 
 imgdataopt.xstatic: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
-	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections -Izlib_src -DNO_VIZ -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o imgdataopt.xstatic imgdataopt.c zlib_src/zall.c
+	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections -Izlib_src -DNO_VIZ -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
+# We don't use -Os instead of -O2, because we appreciate the speed benefit of -O2: -Os is 82164 bytes, -O2 is 95312 bytes, -O3 is 114000 bytes with gcc-7.3.
+imgdataopt.xstaticmini: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
+	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections -Izlib_src -DNO_VIZ -DNO_PMTIFF -DNO_PNM -DNO_REGTEST -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
 # Using -O3 so that it will be faster in pdfsizeopt.
 imgdataopt.xstatico3: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections -Izlib_src -DNO_VIZ -ansi -pedantic -s -O3 $(WFLAGS) $(CFLAGS) -o imgdataopt.xstatico3 imgdataopt.c zlib_src/zall.c
@@ -45,4 +48,4 @@ imgdataopt.tcc: imgdataopt.c $(ZLIB_SRCS)
 	strip imgdataopt.tcc
 
 clean:
-	rm -f core imgdataopt imgdataopt.yes imgdataopt.lz imgdataopt.tcclz imgdataopt.exe imgdataopt.xstatic imgdataopt.xstatico3 imgdataopt.darwinc32 imgdataopt.darwinc64 *.o zlib_src/*.o
+	rm -f core imgdataopt imgdataopt.yes imgdataopt.lz imgdataopt.tcclz imgdataopt.exe imgdataopt.xstatic imgdataopt.xstaticmini imgdataopt.xstatico3 imgdataopt.darwinc32 imgdataopt.darwinc64 *.o zlib_src/*.o

@@ -250,7 +250,7 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc);
 
 /* --- PNM */
 
-/* !! Add -DNO_TIFF_PREDICTOR option to omit PM_TIFF2 support for reading and writing PNG and save space. */
+/* !! Add -DNO_PMTIFF option to omit PM_TIFF2 support for reading and writing PNG and save space. */
 /* !! Add -DNO_PNM option to option PNM functionality and save space. */
 
 static void write_pnm(const char *filename, const Image *img) {
@@ -1044,14 +1044,19 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   if (color_type == CT_INDEXED_RGB) check_palette(img);
 }
 
+/* Don't use ATTRIBUTE_USED here, it will include it to the binary even if unused.
+ * Use INLINE instead if you don't mind inlining.
+ */
+#if !NO_REGTEST
 static void read_png(const char *filename, Image *img) {
   const xbool_t force_bpc8 = 0;
   FILE *f;
   if (!(f = fopen(filename, "rb"))) die("error reading png");
   read_png_stream(f, img, force_bpc8);
-  if (ferror(f)) die("error reading png");
+  if (ferror(f)) die("error reading pngggg");
   fclose(f);
 }
+#endif
 
 /* --- */
 
@@ -1791,8 +1796,9 @@ static void optimize_for_png(Image *img, xbool_t is_extended,
   }
 }
 
-/* --- */
+/* --- Regression test. */
 
+#if !NO_REGTEST
 static void init_image_chess(Image *img) {
   const xbool_t do_alloc_bpc8 = 0;
   enum { kWidth = 91, kHeight = 84 };  /* For -ansi -pedantic. */
@@ -1972,8 +1978,9 @@ static void regression_test() {
   write_png("beach3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
 }
+#endif
 
-/* --- */
+/* --- main(). */
 
 static xbool_t is_endswith(const char *p, const char *suffix) {
   const size_t plen = strlen(p);
@@ -2052,9 +2059,11 @@ int main(int argc, char **argv) {
     } else if (arg[1] == 's' && arg[2] == '\0' && *argi) {
       arg = *argi++;
       goto process_s_flag;
+#if !NO_REGTEST
     } else if (0 == strcmp(arg, "--regression-test")) {
-      regression_test();  /* !! Add -DNO_REGRESSION_TEST to save space. */
+      regression_test();
       return 0;
+#endif
     } else {
       die("unknown flag");
     }
