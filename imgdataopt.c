@@ -250,7 +250,8 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc);
 
 /* --- PNM */
 
-/* !! Add -DNO_PNM option to remove PNM functionality and save space. */
+/* !! Add -DNO_TIFF_PREDICTOR option to omit PM_TIFF2 support for reading and writing PNG and save space. */
+/* !! Add -DNO_PNM option to option PNM functionality and save space. */
 
 static void write_pnm(const char *filename, const Image *img) {
   const uint32_t width = img->width;
@@ -1987,6 +1988,7 @@ int main(int argc, char **argv) {
   uint8_t predictor_mode = PM_SMART;  /* Also the default of sam2p. */
   xbool_t is_extended = 0;  /* Allow extended (nonstandard) PNG output? */
   xbool_t force_gray = 0;
+  xbool_t do_save_pdf_as_png = 0;
   uint8_t flate_level = 9;  /* !! allow override in -c:zip:PREDICTOR:LEVEL; The default of sam2p is 5. */
   Image img;
 
@@ -1999,31 +2001,62 @@ int main(int argc, char **argv) {
     } else if (0 == strcmp(arg, "--")) {
       break;
     } else if (0 == strcmp(arg, "-j:quiet")) {
-      /* Ignore this flag by sam2p. */
+      /* Ignore this flag, for compatibility with sam2p called by pdfsizeopt. */
+    } else if (0 == strcmp(arg, "-pdf:2")) {
+      /* For compatibility with sam2p called by pdfsizeopt (sam2p_np). */
+      is_extended = 1;
+      do_save_pdf_as_png = 1;
     } else if (0 == strcmp(arg, "-j:ext") ||  /* sam2p takes is as -j (do_displayJobFile=true). Not recommended for compatibiltiy. */
                0 == strcmp(arg, "-j:00")) {  /* sam2p takes it as -j:job:0 (do_displayJobFile=false), same as the default. */
       is_extended = 1;
-    } else if (0 == strcmp(arg, "-c:zip:1:9")) {
-      predictor_mode = PM_NONE;
-    } else if (0 == strcmp(arg, "-c:zip:10:9")) {
-      predictor_mode = PM_PNGNONE;
-    } else if (0 == strcmp(arg, "-c:zip:15:9")) {
-      predictor_mode = PM_PNGAUTO;
-    } else if (0 == strcmp(arg, "-c:zip:25:9")) {
-      predictor_mode = PM_SMART;
-    } else if (0 == strcmp(arg, "-c:zip")) {
-      predictor_mode = PM_NONE;
-      flate_level = 5;  /* sam2p default. Not recommended. */
-    } else if (0 == strcmp(arg, "-s:grays")) {
-      /* !! add better compatibility? how should pdfsizeopt detect wheter sam2p or imgdataopt is used?
-       * pdfsizeopt calls with: -s Gray1:Indexed1:Gray2:Indexed2:Rgb1:Gray4:Indexed4:Rgb2:Gray8:Indexed8:Rgb4:Rgb8:stop
-       * pdfsizeopt calls with: -s Gray1:Gray2:Gray4:Gray8:stop
+    } else if (arg[1] == 'c' && arg[2] == ':') {
+      arg += 3;
+     process_c_flag:
+      if (0 == strcmp(arg, "zip:1:9")) {
+        predictor_mode = PM_NONE;
+      } else if (0 == strcmp(arg, "zip:10:9")) {
+        predictor_mode = PM_PNGNONE;
+      } else if (0 == strcmp(arg, "zip:15:9")) {
+        predictor_mode = PM_PNGAUTO;
+      } else if (0 == strcmp(arg, "zip:25:9")) {
+        predictor_mode = PM_SMART;
+      } else if (0 == strcmp(arg, "zip")) {  /* sam2p default. Not recommended. */
+        predictor_mode = PM_NONE;
+        flate_level = 5;
+      } else {
+        die("unknown -c flag value");
+      }
+    } else if (arg[1] == 'c' && arg[2] == '\0' && *argi) {
+      arg = *argi++;
+      goto process_c_flag;
+    } else if (arg[1] == 's' && arg[2] == ':') {
+      arg += 3;
+     process_s_flag:
+      /* * pdfsizeopt calls with `-s Gray1:Indexed1:Gray2:Indexed2:Rgb1:Gray4:Indexed4:Rgb2:Gray8:Indexed8:Rgb4:Rgb8:stop'
+       *   when creating a non-grayscale PDF file with sam2p_np.
+       * * pdfsizeopt calls without -s
+       *   when creating a non-grayscale PNG file with sam2p_pr.
+       *   This is equivalent to the one above for nontransparent PNG output.
+       * * pdfsizeopt calls with `-s Gray1:Gray2:Gray4:Gray8:stop'
+       *   when creating a grayscale output (PDF file with sam2p_np or PNG file with sam2p_pr).
        */
-      force_gray = 1;
+      if (0 == strcmp(arg, "grays") ||  /* sam2p doesn't support this. */
+          0 == strcmp(arg, "Gray1:Gray2:Gray4:Gray8:stop")) {  /* Also works with sam2p. pdfsizeopt calls with this. */
+        force_gray = 1;
+      } else if (0 == strcmp(arg, "Gray1:Indexed1:Gray2:Indexed2:Rgb1:Gray4:Indexed4:Rgb2:Gray8:Indexed8:Rgb4:Rgb8:stop")) {
+        /* Also works with sam2p. For non-transparaent PNG output, it's the same as without -s. pdfsizeopt calls with this. */
+        force_gray = 0;
+      } else {
+        die("unknown -s flag value");
+      }
+    } else if (arg[1] == 's' && arg[2] == '\0' && *argi) {
+      arg = *argi++;
+      goto process_s_flag;
     } else if (0 == strcmp(arg, "--regression-test")) {
       regression_test();  /* !! Add -DNO_REGRESSION_TEST to save space. */
       return 0;
     } else {
+      die("unknown flag");
     }
   }
   /* !! add --help */
@@ -2034,7 +2067,8 @@ int main(int argc, char **argv) {
   noalloc_image(&img);
   read_image(inputfn, &img, force_bpc8);
   /* TODO(pts): Use case insensitive comparison for extensions. */
-  if (is_endswith(outputfn, ".png")) {
+  if (is_endswith(outputfn, ".png") ||
+      (do_save_pdf_as_png && is_endswith(outputfn, ".pdf"))) {
     optimize_for_png(&img, is_extended, force_gray);
     write_png(outputfn, &img, is_extended, predictor_mode, flate_level);
   } else if (is_endswith(outputfn, ".ppm")) {
