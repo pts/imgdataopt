@@ -2001,7 +2001,8 @@ int main(int argc, char **argv) {
       break;
     } else if (0 == strcmp(arg, "-j:quiet")) {
       /* Ignore this flag by sam2p. */
-    } else if (0 == strcmp(arg, "-j:ext")) {  /* Not sam2p. */
+    } else if (0 == strcmp(arg, "-j:ext") ||  /* sam2p takes is as -j (do_displayJobFile=true). Not recommended for compatibiltiy. */
+               0 == strcmp(arg, "-j:00")) {  /* sam2p takes it as -j:job:0 (do_displayJobFile=false), same as the default. */
       is_extended = 1;
     } else if (0 == strcmp(arg, "-c:zip:1:9")) {
       predictor_mode = PM_NONE;
