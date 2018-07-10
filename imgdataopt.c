@@ -156,7 +156,7 @@ static uint32_t add0_check(uint32_t a, uint32_t b) {
 static uint32_t multiply_check(uint32_t a, uint32_t b) {
   const uint32_t result = a * b;
   /* Check for overflow. Works only if everything is unsigned. */
-  if (result / a != b) die("integer overflow");
+  if (a != 0 && result / a != b) die("integer overflow");
   return result;
 }
 
