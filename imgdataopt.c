@@ -250,8 +250,6 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc);
 
 /* --- PNM */
 
-/* !! Add -DNO_PMTIFF option to omit PM_TIFF2 support for reading and writing PNG and save space. */
-
 #if !NO_PNM
 static void write_pnm(const char *filename, const Image *img) {
   const uint32_t width = img->width;
@@ -389,7 +387,9 @@ static void read_pnm_stream(FILE *f, Image *img, xbool_t force_bpc8) {
 
 /* Predictor modes. Same as sam2p -c:zip:... */
 #define PM_NONE 1
+#if !NO_PMTIFF
 #define PM_TIFF2 2
+#endif
 #define PM_PNGNONE 10
 #define PM_PNGAUTO 15
 #define PM_SMART 25  /* Default of sam2p. */
@@ -482,6 +482,7 @@ static uint32_t write_png_img_data(
     const uint32_t usize = multiply_check(rlen, height);
     zs.avail_in = usize;  /* TODO(pts): Check for overflow. */
     /* Z_FINISH below will do all the compression. */
+#if !NO_PMTIFF
   } else if (predictor_mode == PM_TIFF2) {
     /* Implemented in TIFFPredictor2::vi_write in encoder.cpp in sam2p. */
     const uint8_t bpx = (cpp - 1) * bpc;
@@ -541,6 +542,7 @@ static uint32_t write_png_img_data(
       if (zs.avail_in != 0) die("deflate has not processed all input");
     }
     free(tmp);
+#endif
   } else if (predictor_mode == PM_PNGAUTO) {
     /* 1 for the predictor identifier in the row, 6 for the 5 predictors + copy
      * of the previous row.
@@ -791,7 +793,10 @@ static void check_palette(const Image *img) {
 /* img must be initialized (at least noalloc_image). */
 static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   uint32_t width, height, palette_size = 0;
-  uint8_t bpc, bpx = 0, color_type, filter;
+  uint8_t bpc, color_type, filter;
+#if !NO_PMTIFF
+  uint8_t bpx = 0;
+#endif
   char right_and_byte = 0;
   /* Must be large enough for the PNG header (33 bytes), for the palette (3
    * * 256 bytes), and must be fast enough for inflate, and must be at least
@@ -825,7 +830,12 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   if (*p++ != PNG_COMPRESSION_DEFAULT) die("bad png compression");
   filter = *p++;
   /* PNG supports filter == 0 only; 1 and 2 are imgdataopt extensions. */
-  if (filter != PNG_FILTER_DEFAULT && filter != PM_NONE && filter != PM_TIFF2) die("bad png filter");
+  if (filter != PNG_FILTER_DEFAULT &&
+#if !NO_PMTIFF
+      filter != PM_TIFF2 &&
+#endif
+      filter != PM_NONE
+     ) die("bad png filter");
   if (*p++ != PNG_INTERLACE_NONE) die("not supported png interlace");
   for (;;) {
     uint32_t chunk_size;
@@ -862,7 +872,9 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
         palette_size = 0;
        do_alloc_image:
         alloc_image(img, width, height, bpc, color_type, palette_size, force_bpc8);
+#if !NO_PMTIFF
         bpx = (img->cpp - 1) * bpc;
+#endif
         left_delta_inv = bpc * img->cpp;
         right_and_byte = ((width & 7) * left_delta_inv) & 7;
         /* 0: 0xff, 1: 0x80, 2: 0xc0, 3: 0xe0, 4: 0xf0, 5: 0xf8, 6: 0xfc, 7: 0xfe. */
@@ -894,9 +906,11 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
             } else if (filter == PM_NONE) {
               zs.next_out = (Bytef*)dp;
               zs.avail_out = d_remaining;  /* TODO(pts): Check for overflow. */
+#if !NO_PMTIFF
             } else if (filter == PM_TIFF2) {
               zs.next_out = (Bytef*)dp;
               zs.avail_out = rlen;
+#endif
             }
           }
           /* There was an error or EOF before, we can't inflate anymore. */
@@ -966,6 +980,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
               zs.avail_out = d_remaining != 0;
             } else if (filter == PM_NONE) {
               d_remaining = 0;
+#if !NO_PMTIFF
             } else if (filter == PM_TIFF2) {
               /* Unfilter (predictor) a single row. */
               uint32_t h = 0;
@@ -1011,6 +1026,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
               d_remaining -= rlen;
               zs.next_out = (Bytef*)dp;
               zs.avail_out = d_remaining != 0 ? rlen : 0;
+#endif
             }
           }
         }
@@ -1840,6 +1856,10 @@ static void init_image_squares(Image *img) {
     }
   }
 }
+
+#if NO_PMTIFF
+#error regression_test() needs PM_TIFF2, please omit -DNO_PMTIFF
+#endif
 
 /* TODO(pts): Compare the output with the expected output. */
 static void regression_test() {
