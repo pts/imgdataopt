@@ -133,11 +133,25 @@ int inflateEnd(z_stream *strm);
 uLong crc32(uLong crc, const Bytef *buf, uInt len);
 #endif
 
+/* Otherwise no use of printf, sprintf and fprintf in the code, so
+ * imgdataopt.xstaticmini can omit that code.
+ */
+#define DEBUGF(...) fprintf(stderr, __VA_ARGS__)
+#define INFOF(...)  fprintf(stderr, __VA_ARGS__)
+
 typedef char xbool_t;
 
 static ATTRIBUTE_NORETURN void die(const char *msg) {
-  fprintf(stderr, "fatal: %s\n", msg);  /* !! get rid of printf */
+  fwrite("fatal: ", 1, 7, stderr);
+  fwrite(msg, 1, strlen(msg), stderr);
+  putc('\n', stderr);
   exit(120);
+}
+
+static void warn(const char *msg) {
+  fwrite("warning: ", 1, 9, stderr);
+  fwrite(msg, 1, strlen(msg), stderr);
+  putc('\n', stderr);
 }
 
 static uint32_t add_check(uint32_t a, uint32_t b) {
@@ -251,6 +265,19 @@ static void convert_to_bpc(Image *img, uint8_t to_bpc);
 /* --- PNM */
 
 #if !NO_PNM
+static void fwrite_dec32(FILE *f, uint32_t u) {
+  char tmp[9], *p = tmp;
+  do {
+    const uint32_t m = u % 10;
+    u /= 10;
+    *p++ = m + '0';
+  } while (u != 0);
+  while (p != tmp) {
+    const char c = *--p;
+    putc(c, f);
+  }
+}
+
 static void write_pnm(const char *filename, const Image *img) {
   const uint32_t width = img->width;
   uint32_t height = img->height;
@@ -258,7 +285,11 @@ static void write_pnm(const char *filename, const Image *img) {
   FILE *f;
   if (img->bpc == 1 && img->color_type == CT_GRAY) {  /* PBM. */
     if (!(f = fopen(filename, "wb"))) die("error writing pnm");
-    fprintf(f, "P4 %lu %lu\n", (unsigned long)width, (unsigned long)height);
+    fwrite("P4 ", 1, 3, f);
+    fwrite_dec32(f, width);
+    putc(' ', f);
+    fwrite_dec32(f, height);
+    putc('\n', f);
     if ((width & 7) == 0) {
       while (p != pend) {
         const char c = ~*p++;
@@ -282,9 +313,16 @@ static void write_pnm(const char *filename, const Image *img) {
     if (img->bpc != 8) die("need bpc=8 for writing pnm");
     if (img->cpp != 1 && img->cpp != 3) die("need cpp=1 or =3 for writing pnm");
     if (!(f = fopen(filename, "wb"))) die("error writing pnm");
-    fprintf(f, "%s%lu %lu 255\n",
-            img->color_type == CT_GRAY ? "P5 " : "P6 ",
-            (unsigned long)width, (unsigned long)height);
+    putc('P', f);
+    {
+      const char c = img->color_type == CT_GRAY ? '5' : '6';
+      putc(c, f);
+    }
+    putc(' ', f);
+    fwrite_dec32(f, width);
+    putc(' ', f);
+    fwrite_dec32(f, height);
+    fwrite(" 255\n", 1, 5, f);
     if (pend < p) die("image too large");
     if (img->color_type == CT_INDEXED_RGB) {
       const char *palette = img->palette;
@@ -598,7 +636,7 @@ static uint32_t write_png_img_data(
 
       --best_predicted;
       best_predicted[0] = (best_predicted - tmp) / rlen;
-      /* fprintf(stderr, "best_predictor=%d min_weight=%d\n", *best_predicted, best_rowsum); */
+      /* DEBUGF("best_predictor=%d min_weight=%d\n", *best_predicted, best_rowsum); */
       zs.next_in = (Bytef*)best_predicted;
       zs.avail_in = rlen1;
       do {
@@ -758,7 +796,7 @@ static void check_palette(const Image *img) {
     /* Now check that the image doesn't contain too high color indexes. */
     const unsigned char *p = (const unsigned char*)img->data;
     const unsigned char *pend = p + img->height * img->rlen;
-    /* fprintf(stderr, "mci=%d bpc=%d\n", max_color_idx, img->bpc); */
+    /* DEBUGF("mci=%d bpc=%d\n", max_color_idx, img->bpc); */
     /* The loops below assume that unused bits at the end of each row are 0. */
     if (bpc == 8) {
       for (; p != pend; ++p) {
@@ -880,7 +918,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
         /* 0: 0xff, 1: 0x80, 2: 0xc0, 3: 0xe0, 4: 0xf0, 5: 0xf8, 6: 0xfc, 7: 0xfe. */
         right_and_byte = right_and_byte == 0 ? 0xff :
             (uint16_t)0x7f00 >> right_and_byte;
-        /* fprintf(stderr, "width=%d rlen=%d right_and_byte=0x%x bpc=%d\n", width, rlen, (unsigned char)right_and_byte, bpc); */
+        /* DEBUGF("width=%d rlen=%d right_and_byte=0x%x bpc=%d\n", width, rlen, (unsigned char)right_and_byte, bpc); */
         left_delta_inv = ((left_delta_inv + 7) >> 3);
       }
       while (chunk_size > 0) {
@@ -1040,14 +1078,14 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
   }
   if (!img->data && width > 0 && height > 0) die("missing png image data");
   if (zr == Z_DATA_ERROR) {
-    fprintf(stderr, "warning: bad png image data or bad adler32\n");
+    warn("bad png image data or bad adler32");
   }
   if (d_remaining == 0) {
     if (dp && zr == Z_OK && (zs.avail_in != 0 || zs.avail_out != 0)) {  /* Not Z_STREAM_END. */
-      fprintf(stderr, "warning: png image data too long\n");
+      warn("png image data too long");
     }
   } else {
-    fprintf(stderr, "warning: png image data too short\n");
+    warn("png image data too short\n");
     /* TODO(pts): Make it white instead on RGB and gray. */
     memset(dp, '\0', d_remaining);
   }
@@ -1264,7 +1302,7 @@ static uint32_t build_palette_from_rgb8(char *p, uint32_t size, char *palette) {
       if (hv == 0) {  /* Free slot. */
         if (op == order + 256) return 1;  /* Too many different colors. */
         *op++ = hk;
-        /* fprintf(stderr, "new color v=0x%08x\n", v); */
+        /* DEBUGF("new color v=0x%08x\n", v); */
         hashtable[hk] = v;
         break;
       } else if (hv == v) {  /* Found color v. */
@@ -1273,10 +1311,10 @@ static uint32_t build_palette_from_rgb8(char *p, uint32_t size, char *palette) {
     }
   }
 #if 0
-  fprintf(stderr, "palette:\n");
+  DEBUGF("palette:\n");
   for (oq = op, op = order; op != oq; ++op) {
     const uint32_t v = hashtable[*op];
-    fprintf(stderr, "#%08x oi=%d\n", v, *op);
+    DEBUGF("#%08x oi=%d\n", v, *op);
   }
 #endif
 
@@ -1368,7 +1406,7 @@ static void normalize_palette(Image *img) {
   palette_size = build_palette_from_rgb8(
       palette_map, img->palette_size, palette);
   if (palette_size == 1) die("ASSERT: too many colors in indexed");
-  /* fprintf(stderr, "palette_size: old=%d new=%d\n", img->palette_size, palette_size); */
+  /* DEBUGF("palette_size: old=%d new=%d\n", img->palette_size, palette_size); */
   {  /* Apply palette_map (mapping from old to new palette indexes). */
     char *p = img->data;
     char * const pend = p + size;
@@ -1870,42 +1908,42 @@ static void regression_test() {
 
   init_image_chess(&img);
   /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_pnm("chess2.ppm", &img);
   write_png("chess2.png", &img, is_extended, predictor_mode, flate_level);
   write_png("chess2n.png", &img, 1, PM_NONE, 9);
   normalize_palette(&img);
   /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   convert_to_bpc(&img, 1);
   write_png("chess2i1.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i1.png", &img);
   convert_to_bpc(&img, 2);
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /*INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2i2.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i2.png", &img);
   convert_to_bpc(&img, 4);
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /*INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2i4.png", &img, is_extended, PM_NONE, 9);
   read_png("chess2i4.png", &img);
   convert_to_bpc(&img, 1);
   img.color_type = CT_GRAY;  /* This only works if bpc=1. */
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /*INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g1.png", &img, is_extended, PM_NONE, 9);
   write_pnm("chess2.pbm", &img);
   convert_to_bpc(&img, 2);
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /*INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g2.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 4);
   write_png("chess2g4.png", &img, is_extended, PM_NONE, 9);
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /*INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   convert_to_bpc(&img, 8);
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /*INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("chess2g8.png", &img, is_extended, PM_NONE, 9);
   write_pnm("chess2.pgm", &img);
   convert_to_rgb(&img);
   /* color_type=2 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("chess2r8.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 4);
   write_png("chess2r4.png", &img, 1, PM_PNGAUTO, 9);
@@ -1916,7 +1954,7 @@ static void regression_test() {
   convert_to_bpc(&img, 8);
   convert_to_gray(&img);
   /* color_type=0 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_pnm("chess3.pgm", &img);
   write_png("chess3g8.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 4);
@@ -1932,7 +1970,7 @@ static void regression_test() {
   convert_to_bpc(&img, 8);
   convert_to_indexed(&img);
   /* color_type=3 bpc=8 is_gray_ok=1 min_bpc=1 min_rgb_bpc=1 color_count=2 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("chess3ngi8.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 1);
   write_png("chess3ngi1.png", &img, is_extended, PM_PNGAUTO, 9);
@@ -1950,17 +1988,17 @@ static void regression_test() {
   dealloc_image(&img);
   init_image_squares(&img);
   /* color_type=3 bpc=8 is_gray_ok=0 min_bpc=2 min_rgb_bpc=1 color_count=4 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("square1i8.png", &img, is_extended, PM_NONE, 9);
   normalize_palette(&img);
   write_png("square2i8.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 2);
-  /*fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
+  /*INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));*/
   write_png("square2i2.png", &img, is_extended, PM_NONE, 9);
   convert_to_bpc(&img, 8);
   convert_to_rgb(&img);
   /* color_type=2 bpc=8 is_gray_ok=0 min_bpc=1 min_rgb_bpc=1 color_count=4 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_pnm("square2.ppm", &img);
   write_png("square2r8.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 4);
@@ -1979,7 +2017,7 @@ static void regression_test() {
   write_png("square2r18.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_indexed(&img);
   /* color_type=3 bpc=8 is_gray_ok=0 min_bpc=2 min_rgb_bpc=1 color_count=4 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("square2ri8.png", &img, is_extended, PM_PNGAUTO, 9);
   convert_to_bpc(&img, 2);
   write_png("square2ri2.png", &img, is_extended, PM_PNGAUTO, 9);
@@ -1997,7 +2035,7 @@ static void regression_test() {
   /* !! Add a smaller version of beach.png to the repo. */
   read_png("beach.png", &img);
   /* color_type=2 bpc=8 is_gray_ok=0 min_bpc=8 min_rgb_bpc=8 color_count=257 */
-  fprintf(stderr, "color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
+  INFOF("color_type=%d bpc=%d is_gray_ok=%d min_bpc=%d min_rgb_bpc=%d color_count=%d\n", img.color_type, img.bpc, is_gray_ok(&img), get_min_bpc(&img), get_min_rgb_bpc(&img), get_color_count(&img));
   write_png("beach3.png", &img, is_extended, PM_PNGNONE, 9);
   dealloc_image(&img);
 }
