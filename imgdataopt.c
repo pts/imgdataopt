@@ -1210,7 +1210,6 @@ static uint16_t get_color_count(const Image *img) {
  * Only works if img->bpc == 8.
  */
 static uint8_t get_min_rgb_bpc(const Image *img) {
-  char palette[3 << 8];
   const char *p, *pend;
   uint8_t bpc1 = 0;
   const uint32_t size = img->rlen * img->height;
@@ -1219,29 +1218,34 @@ static uint8_t get_min_rgb_bpc(const Image *img) {
     unsigned char used[256];
     const unsigned char *pu = (const unsigned char*)img->data;
     const unsigned char *puend = pu + size;
-    const char *cp = img->palette;
-    char *pp = palette;
+    const char *p3;
 
     memset(used, '\0', sizeof(used));
     for (; pu != puend; used[*pu++] = 1) {}
-    pu = used;  puend = pu + img->palette_size / 3;
-    while (pu != puend) {
-      if (*pu++ != 0) {
-        *pp++ = *cp++; *pp++ = *cp++; *pp++ = *cp++;
+    p = img->palette; pend = p + img->palette_size; pu = used;
+    while (p != pend) {
+      p3 = p + 3;
+      if (*pu++) {  /* This palette entry is used. */
+        while (p != p3) {
+          const unsigned char v = *p++;
+          /* TODO(pts): Would a lookup table be faster here? */
+          if ((v >> 4) != (v & 15)) return 8;
+          if ((((v >> 2) ^ v) & 3) != 0) bpc1 |= 3;
+          if ((((v >> 1) ^ v) & 1) != 0) bpc1 |= 1;
+        }
       } else {
-        cp += 3;
+        p = p3;
       }
     }
-    p = palette; pend = pp;
   } else {
     p = img->data; pend = p + size;
-  }
-  while (p != pend) {
-    const unsigned char v = *p++;
-    /* TODO(pts): Would a lookup table be faster here? */
-    if ((v >> 4) != (v & 15)) return 8;
-    if ((((v >> 2) ^ v) & 3) != 0) bpc1 |= 3;
-    if ((((v >> 1) ^ v) & 1) != 0) bpc1 |= 1;
+    while (p != pend) {
+      const unsigned char v = *p++;
+      /* TODO(pts): Would a lookup table be faster here? */
+      if ((v >> 4) != (v & 15)) return 8;
+      if ((((v >> 2) ^ v) & 3) != 0) bpc1 |= 3;
+      if ((((v >> 1) ^ v) & 1) != 0) bpc1 |= 1;
+    }
   }
   return bpc1 + 1;
 }
