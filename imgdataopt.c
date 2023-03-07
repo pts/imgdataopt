@@ -1210,7 +1210,7 @@ static uint16_t get_color_count(const Image *img) {
  * Only works if img->bpc == 8.
  */
 static uint8_t get_min_rgb_bpc(const Image *img) {
-  char palette[256];
+  char palette[3 << 8];
   const char *p, *pend;
   uint8_t bpc1 = 0;
   const uint32_t size = img->rlen * img->height;
