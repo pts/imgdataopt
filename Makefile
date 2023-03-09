@@ -32,9 +32,9 @@ imgdataopt.xstaticmini: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 imgdataopt.xstatico3: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -ansi -pedantic -s -O3 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
 imgdataopt.exe: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
-	$(CC_MINGW) -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
+	$(CC_MINGW) -mconsole -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
 imgdataopt.mini.exe: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
-	$(CC_MINGW) -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -DNO_PMTIFF -DNO_PNM -DNO_REGTEST -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
+	$(CC_MINGW) -mconsole -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -DNO_PMTIFF -DNO_PNM -DNO_REGTEST -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
 # Without -DNO_COMBINE64 we'd get this error: Undefined symbols for architecture i386: "___moddi3", referenced from: _adler32_combine in zall-....o _adler32_combine64 in zall-....o
 # Another solution is adding -lgcc with libgcc.a taken from somewhere else.
 imgdataopt.darwinc32: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
