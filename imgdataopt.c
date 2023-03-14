@@ -222,7 +222,7 @@ static void noalloc_image(Image *img) {
   img->data = img->palette = NULL;
 }
 
-/* Keeps the byes in img->data and img->palette uninitialized. */
+/* Keeps the bytes in img->data and img->palette uninitialized. */
 static void alloc_image(
     Image *img, uint32_t width, uint32_t height, uint8_t bpc,
     uint8_t color_type, uint32_t palette_size, xbool_t do_alloc_bpc8) {
@@ -246,9 +246,12 @@ static void alloc_image(
   img->bpc = bpc;
   img->color_type = color_type;
   img->cpp = cpp;
-  if (palette_size == 0 && color_type == CT_INDEXED_RGB) palette_size = 3 * 256;
-  if (palette_size != 0 && color_type != CT_INDEXED_RGB) palette_size = 0;
-  if (palette_size % 3 != 0) die("bad palette_size");
+  if (color_type == CT_INDEXED_RGB) {
+    if (palette_size == 0) die("missing palette");
+    if (palette_size % 3 != 0) die("bad palette_size");
+  } else {
+    if (palette_size != 0) die("unexpected palette");
+  }
   img->palette_size = palette_size;
   img->data = (char*)xmalloc(alloced);
   img->palette = (char*)xmalloc(palette_size);
@@ -885,7 +888,7 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
        * transparency in tRNS), so this code is not suitable as a
        * general-purpose PNG renderer.
        */
-      const xbool_t is_plte = 0 == memcmp(p, "PLTE", 4);
+      xbool_t is_plte = 0 == memcmp(p, "PLTE", 4);
       const xbool_t is_idat = 0 == memcmp(p, "IDAT", 4);
       const xbool_t is_iend = 0 == memcmp(p, "IEND", 4);
       uint32_t crc32v = crc32(0, (const Bytef*)p, 4);
@@ -900,9 +903,16 @@ static void read_png_stream(FILE *f, Image *img, xbool_t force_bpc8) {
           /* die("png palette too long"); */
           palette_size = 3U << bpc;
         } else {
-          palette_size = chunk_size;
+          palette_size = chunk_size;  /* Nonzero at this point. */
         }
-        goto do_alloc_image;
+        if (color_type == CT_RGB || color_type == CT_RGB_ALPHA) {
+          is_plte = 0;  /* Ignore the PLTE chunk, it's just a quantization hint. */
+          palette_size = 0;
+        } else if (color_type == CT_INDEXED_RGB) {
+          goto do_alloc_image;
+        } else {
+          die("unexpected png palette");
+        }
       }
       if (is_idat && !img->data) {
         /* PNG requires that PLTE is appears after IDAT. */
