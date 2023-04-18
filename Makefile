@@ -27,7 +27,7 @@ imgdataopt.xstatic: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 # Good for pdfsizept, -DNO_PMTIFF is also OK, because that just removes reading of nonstandard PNG (with the TIFF2 predictor), and pdfsizeopt doesn't pass it as input.
 # We don't use -Os instead of -O2, because we appreciate the speed benefit of -O2: -Os is 82164 bytes, -O2 is 95312 bytes, -O3 is 114000 bytes with gcc-7.3.
 imgdataopt.xstaticmini: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
-	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -DNO_PMTIFF -DNO_PNM -DNO_REGTEST -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
+	xstatic $(CC) -march=i686 -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -DNO_PMTIFF -DNO_PNM -DNO_REGTEST -ansi -pedantic -s -O2 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
 # Using -O3 so that it will be faster in pdfsizeopt.
 imgdataopt.xstatico3: imgdataopt.c $(ZLIB_HEADERS) $(ZLIB_SRCS)
 	xstatic $(CC) -Wl,--gc-sections -ffunction-sections -fdata-sections $(ZLIB_SRC_FLAGS) -ansi -pedantic -s -O3 $(WFLAGS) $(CFLAGS) -o $@ imgdataopt.c zlib_src/zall.c
