@@ -792,7 +792,7 @@ static void check_palette(const Image *img) {
   const uint8_t max_color_idx = (palette_size / 3) - 1;
   const uint8_t bpc = img->bpc;
   if (img->color_type != CT_INDEXED_RGB) return;
-  if (palette_size == 0 || palette_size >= 3 * 256 ||
+  if (palette_size == 0 || palette_size > 3 * 256 ||
       palette_size % 3 != 0) die("bad palette size");
   if (!img->palette) die("missing palette");
   if (max_color_idx < (1 << img->bpc) - 1) {
